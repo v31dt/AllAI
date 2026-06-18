@@ -12,6 +12,18 @@ class MigrationParserTests(unittest.TestCase):
         self.assertEqual(parsed.native, "to do")
         self.assertEqual(parsed.example, "Wat ben je aan het doen?")
 
+    def test_parse_pipe_text_with_html_break_example(self) -> None:
+        parsed = parse_pipe_text(
+            'bijzin | subordinate clause; the finite verb moves to the end <br> '
+            'Ik doe een cursus omdat ik Nederlands wil leren. – "I am taking a course because I want to learn Dutch."'
+        )
+        self.assertEqual(parsed.target, "bijzin")
+        self.assertEqual(parsed.native, "subordinate clause; the finite verb moves to the end")
+        self.assertEqual(
+            parsed.example,
+            'Ik doe een cursus omdat ik Nederlands wil leren. – "I am taking a course because I want to learn Dutch."',
+        )
+
     def test_parse_pipe_text_without_example(self) -> None:
         parsed = parse_pipe_text("dokter | doctor")
         self.assertEqual(parsed.target, "dokter")

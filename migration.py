@@ -62,7 +62,7 @@ def parse_pipe_text(text: str) -> ParsedPipeNote:
     if not target or not right:
         raise ValueError("Missing target or meaning.")
 
-    native, example = _split_trailing_parenthetical(right)
+    native, example = _split_native_and_example(right)
     return ParsedPipeNote(target=target, native=native.strip(), example=example.strip())
 
 
@@ -71,12 +71,9 @@ def parse_front_back_fields(front: str, back: str) -> ParsedPipeNote:
     if not target:
         raise ValueError("Missing front/target text.")
 
-    parts = [part.strip() for part in _HTML_BREAK_RE.split(back) if part.strip()]
-    if not parts:
+    native, example = _split_native_and_example(back)
+    if not native:
         raise ValueError("Missing back/native text.")
-
-    native = parts[0]
-    example = parts[1] if len(parts) > 1 else ""
     return ParsedPipeNote(target=target, native=native, example=example)
 
 
@@ -109,6 +106,13 @@ def _split_trailing_parenthetical(text: str) -> tuple[str, str]:
                     return native, example
                 break
     return text, ""
+
+
+def _split_native_and_example(text: str) -> tuple[str, str]:
+    parts = [part.strip() for part in _HTML_BREAK_RE.split(text) if part.strip()]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return _split_trailing_parenthetical(text)
 
 
 def ensure_deck_id(col: Any, deck_name: str) -> int:
