@@ -19,10 +19,20 @@ from aqt.utils import showInfo, showWarning, tooltip
 
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .llm_client import OpenAICompatibleClient
-    from .session import DEFAULT_CONFIG, LLMUnavailableError, RoundData, SessionRunner, deep_merge_config
+    from .session import (
+        DEFAULT_CONFIG,
+        LLMUnavailableError,
+        RoundData,
+        SessionRunner,
+        build_search_query,
+        deep_merge_config,
+    )
 except ImportError:  # pragma: no cover
     from llm_client import OpenAICompatibleClient
-    from session import DEFAULT_CONFIG, LLMUnavailableError, RoundData, SessionRunner, deep_merge_config
+    from session import DEFAULT_CONFIG, LLMUnavailableError, RoundData, SessionRunner, build_search_query, deep_merge_config
+
+FILTERED_DECK_NAME = "AllAI Session"
+FILTERED_ORDER_DUE = 6
 
 
 class WordRowWidget(QWidget):
@@ -89,6 +99,9 @@ class SessionDialog(QDialog):
         super().__init__(mw)
         self.mw = mw
         self.config = self._load_config()
+        self.previous_deck_id = int(self.mw.col.decks.selected())
+        self.session_deck_id: int | None = None
+        self._session_cleaned_up = False
         self.runner = SessionRunner(mw.col, self.config, OpenAICompatibleClient.from_config(self.config))
         self.current_round: RoundData | None = None
         self.row_widgets: list[WordRowWidget] = []
@@ -96,7 +109,13 @@ class SessionDialog(QDialog):
         self.setWindowTitle("AllAI Session")
         self.resize(880, 520)
         self._build_ui()
-        self._load_next_round(show_empty_message=True)
+        try:
+            self._setup_session_deck()
+            self._load_next_round(show_empty_message=True)
+        except Exception as exc:
+            self._cleanup_session_deck()
+            showWarning(str(exc))
+            super().reject()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -138,6 +157,31 @@ class SessionDialog(QDialog):
         current = self.mw.addonManager.getConfig(__name__) or {}
         return deep_merge_config(DEFAULT_CONFIG, current)
 
+    def _setup_session_deck(self) -> None:
+        existing = self.mw.col.decks.by_name(FILTERED_DECK_NAME)
+        if existing is not None and not existing.get("dyn"):
+            raise RuntimeError(f'Deck "{FILTERED_DECK_NAME}" already exists and is not filtered.')
+
+        existing_id = int(existing["id"]) if existing is not None else 0
+        deck = self.mw.col.sched.get_or_create_filtered_deck(existing_id)
+        deck.name = FILTERED_DECK_NAME
+        deck.allow_empty = True
+        config = deck.config
+        config.reschedule = True
+        del config.delays[:]
+        del config.search_terms[:]
+        term = config.search_terms.add()
+        term.search = build_search_query(
+            self.config.get("decks", []),
+            bool(self.config["session"]["include_new_cards"]),
+        )
+        term.limit = max(1000, int(self.config["session"]["words_per_sentence"]) * 250)
+        term.order = FILTERED_ORDER_DUE
+        out = self.mw.col.sched.add_or_update_filtered_deck(deck)
+        self.session_deck_id = int(out.id)
+        self.mw.col.decks.select(self.session_deck_id)
+        self.mw.reset()
+
     def _load_next_round(self, *, show_empty_message: bool) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
@@ -145,22 +189,25 @@ class SessionDialog(QDialog):
             self.current_round = self.runner.prepare_next_round()
         except LLMUnavailableError as exc:
             self._restore_cursor()
+            self._cleanup_session_deck()
             showWarning(str(exc))
             self._open_normal_reviewer()
-            self.reject()
+            super().reject()
             return
         finally:
             self._restore_cursor()
 
-        for message in self.runner.drain_messages():
+        messages = self.runner.drain_messages()
+        for message in messages:
             tooltip(message, parent=self)
 
         if self.current_round is None:
+            self._cleanup_session_deck()
             if self.runner.completed_rounds == 0 and show_empty_message:
-                showInfo(self.runner.explain_why_no_cards())
+                showInfo(messages[-1] if messages else self.runner.explain_why_no_cards())
             else:
                 self._show_summary()
-            self.accept()
+            super().accept()
             return
 
         self._render_round(self.current_round)
@@ -234,3 +281,16 @@ class SessionDialog(QDialog):
     def _restore_cursor() -> None:
         if QApplication.overrideCursor() is not None:
             QApplication.restoreOverrideCursor()
+
+    def _cleanup_session_deck(self) -> None:
+        if self._session_cleaned_up:
+            return
+        self._session_cleaned_up = True
+        if self.session_deck_id is not None:
+            self.mw.col.sched.empty_filtered_deck(self.session_deck_id)
+        self.mw.col.decks.select(self.previous_deck_id)
+        self.mw.reset()
+
+    def reject(self) -> None:
+        self._cleanup_session_deck()
+        super().reject()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
@@ -88,6 +87,12 @@ class RoundData:
     reviewed_words_before_round: int
     sentence: str
     sentence_html: str
+    rows: list[RoundRow]
+
+
+@dataclass
+class PreparedAttempt:
+    sentence: str
     rows: list[RoundRow]
 
 
@@ -272,49 +277,31 @@ class SessionRunner:
         self.llm_client = llm_client
         self.reviewed_words = 0
         self.completed_rounds = 0
-        self.deferred_card_ids: set[int] = set()
-        self.dropped_card_ids: set[int] = set()
         self.skip_counts: dict[int, int] = {}
         self._messages: list[str] = []
 
     def prepare_next_round(self) -> RoundData | None:
-        while True:
-            batch = self._select_batch()
-            if not batch:
-                return None
+        batch = self._select_batch()
+        if not batch:
+            return None
 
-            payloads = [build_card_payload(card) for card in batch]
-            words = [payload.target for payload in payloads if payload.target]
-            if not words:
-                self._defer_cards(batch)
-                self._messages.append("Skipped an empty batch.")
-                continue
+        payloads = [build_card_payload(card) for card in batch]
+        if not payloads or not all(payload.target for payload in payloads):
+            self._messages.append("Stopped because the next queued card is missing a Target field.")
+            return None
 
-            for payload in payloads:
-                if hasattr(payload.card, "start_timer"):
-                    payload.card.start_timer()
+        attempt = self._prepare_attempt(payloads)
+        if attempt is None:
+            return None
 
-            try:
-                response = self._generate_sentence_with_retry(words)
-            except SentenceGenerationError:
-                self._defer_cards(batch)
-                continue
-            sentence, words_used = parse_generation_payload(response)
-            rows, unmatched = match_words_to_payloads(payloads, words_used)
-            self._register_unmatched(unmatched)
-            if not rows:
-                self._messages.append("Skipped a batch because no generated words could be matched.")
-                continue
-
-            matched_targets = [row.surface_form or row.target for row in rows]
-            self._clear_deferred([row.card_id for row in rows])
-            return RoundData(
-                round_index=self.completed_rounds + 1,
-                reviewed_words_before_round=self.reviewed_words,
-                sentence=sentence,
-                sentence_html=highlight_sentence(sentence, matched_targets),
-                rows=rows,
-            )
+        matched_targets = [row.surface_form or row.target for row in attempt.rows]
+        return RoundData(
+            round_index=self.completed_rounds + 1,
+            reviewed_words_before_round=self.reviewed_words,
+            sentence=attempt.sentence,
+            sentence_html=highlight_sentence(attempt.sentence, matched_targets),
+            rows=attempt.rows,
+        )
 
     def commit_round(self, round_data: RoundData, ratings: dict[int, str]) -> None:
         missing = [row.card_id for row in round_data.rows if row.card_id not in ratings]
@@ -329,7 +316,6 @@ class SessionRunner:
 
         self.reviewed_words += len(round_data.rows)
         self.completed_rounds += 1
-        self._clear_deferred([row.card_id for row in round_data.rows])
 
     def drain_messages(self) -> list[str]:
         messages = list(self._messages)
@@ -355,27 +341,15 @@ class SessionRunner:
 
     def _select_batch(self) -> list[Any]:
         batch_size = int(self.config["session"]["words_per_sentence"])
-        include_new_cards = bool(self.config["session"]["include_new_cards"])
-        decks = self.config.get("decks", [])
-        query = build_search_query(decks, include_new_cards)
-
-        cards = self._query_cards(query, batch_size)
-        if cards:
-            return cards
-        if self.deferred_card_ids:
-            self.deferred_card_ids.clear()
-            return self._query_cards(query, batch_size)
-        return []
-
-    def _query_cards(self, query: str, batch_size: int) -> list[Any]:
-        card_ids = self.col.find_cards(query)
-        cards = []
-        for card_id in card_ids:
-            if int(card_id) in self.deferred_card_ids or int(card_id) in self.dropped_card_ids:
-                continue
-            cards.append(self.col.get_card(card_id))
-        cards.sort(key=lambda card: int(getattr(card, "due", 0)))
-        return cards[:batch_size]
+        queued = self.col.sched.get_queued_cards(fetch_limit=batch_size)
+        cards: list[Any] = []
+        for queued_card in queued.cards:
+            card_id = int(queued_card.card.id)
+            card = self.col.get_card(card_id)
+            if hasattr(card, "start_timer"):
+                card.start_timer()
+            cards.append(card)
+        return cards
 
     def _generate_sentence_with_retry(self, words: Sequence[str]) -> dict[str, Any]:
         max_retries = int(self.config["session"]["max_llm_retries"])
@@ -396,22 +370,50 @@ class SessionRunner:
             raise SentenceGenerationError("No LLM response was produced.")
         raise last_error
 
-    def _register_unmatched(self, unmatched: Sequence[CardPayload]) -> None:
+    def _prepare_attempt(self, payloads: Sequence[CardPayload]) -> PreparedAttempt | None:
+        for size in range(len(payloads), 0, -1):
+            subset = list(payloads[:size])
+            words = [payload.target for payload in subset]
+            try:
+                response = self._generate_sentence_with_retry(words)
+            except SentenceGenerationError:
+                continue
+            sentence, words_used = parse_generation_payload(response)
+            rows, _ = match_words_to_payloads(subset, words_used)
+            schedulable_rows = _schedulable_prefix_rows(subset, rows)
+            if len(schedulable_rows) != size:
+                continue
+            if size < len(payloads):
+                self._messages.append(
+                    f"Reduced this round to {size} word{'s' if size != 1 else ''} to keep Anki queue order valid."
+                )
+            return PreparedAttempt(sentence=sentence, rows=schedulable_rows)
+
+        lead_card = payloads[0]
+        current = self.skip_counts.get(lead_card.card_id, 0) + 1
+        self.skip_counts[lead_card.card_id] = current
         limit = int(self.config["session"]["max_skip_attempts_per_card"])
-        for payload in unmatched:
-            current = self.skip_counts.get(payload.card_id, 0) + 1
-            self.skip_counts[payload.card_id] = current
-            if current >= limit:
-                self.dropped_card_ids.add(payload.card_id)
-                self.deferred_card_ids.discard(payload.card_id)
-            else:
-                self.deferred_card_ids.add(payload.card_id)
+        if current >= limit:
+            self._messages.append(
+                "Stopped because the next queued card could not be turned into a valid sentence. "
+                "Finish it in normal review, then start a new session."
+            )
+        else:
+            self._messages.append(
+                "Could not generate a schedulable sentence for the next queued card. "
+                "Try starting the session again or review that card normally first."
+            )
+        return None
 
-    def _defer_cards(self, cards: Sequence[Any]) -> None:
-        for card in cards:
-            self.deferred_card_ids.add(int(card.id))
 
-    def _clear_deferred(self, card_ids: Sequence[int]) -> None:
-        for card_id in card_ids:
-            self.deferred_card_ids.discard(int(card_id))
-            self.dropped_card_ids.discard(int(card_id))
+def _schedulable_prefix_rows(
+    payloads: Sequence[CardPayload], rows: Sequence[RoundRow]
+) -> list[RoundRow]:
+    rows_by_card_id = {row.card_id: row for row in rows}
+    prefix: list[RoundRow] = []
+    for payload in payloads:
+        row = rows_by_card_id.get(payload.card_id)
+        if row is None:
+            break
+        prefix.append(row)
+    return prefix

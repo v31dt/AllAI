@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 import unittest
 
 from session import (
@@ -34,10 +35,22 @@ class FakeCard:
 
 
 class FakeSched:
-    def __init__(self, log: list[tuple[str, int | str]]) -> None:
+    def __init__(self, col: "FakeCollection", log: list[tuple[str, int | str]]) -> None:
+        self.col = col
         self.log = log
 
+    def get_queued_cards(self, fetch_limit: int = 1, intraday_learning_only: bool = False) -> SimpleNamespace:
+        self.log.append(("queue_fetch", fetch_limit))
+        cards = [
+            SimpleNamespace(card=SimpleNamespace(id=card_id))
+            for card_id in self.col.queue_order[:fetch_limit]
+        ]
+        return SimpleNamespace(cards=cards)
+
     def answerCard(self, card: FakeCard, ease: int) -> None:
+        if not self.col.queue_order or self.col.queue_order[0] != card.id:
+            raise AssertionError("not at top of queue")
+        self.col.queue_order.pop(0)
         self.log.append(("answer", card.id))
 
 
@@ -45,8 +58,9 @@ class FakeCollection:
     def __init__(self, cards: list[FakeCard], log: list[tuple[str, int | str]]) -> None:
         self.cards_by_id = {card.id: card for card in cards}
         self.card_order = [card.id for card in cards]
+        self.queue_order = [card.id for card in cards]
         self.log = log
-        self.sched = FakeSched(log)
+        self.sched = FakeSched(self, log)
 
     def find_cards(self, query: str) -> list[int]:
         self.log.append(("query", query))
@@ -137,14 +151,33 @@ class SessionTests(unittest.TestCase):
         llm = FakeLLM(
             [
                 {"sentence": "Een zin zonder match.", "words_used": ["onbekend"]},
-                {"sentence": "Nog steeds fout.", "words_used": ["anders"]},
-                {"sentence": "Nog een keer fout.", "words_used": ["weer"]},
+            ]
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"], "session": {"max_skip_attempts_per_card": 1}}, llm)
+        round_data = runner.prepare_next_round()
+        self.assertIsNone(round_data)
+        self.assertEqual(runner.skip_counts[1], 1)
+
+    def test_prepare_next_round_reduces_batch_until_queue_prefix_is_schedulable(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection(
+            [
+                FakeCard(1, "dokter", "doctor", due=1),
+                FakeCard(2, "afspraak", "appointment", due=2),
+            ],
+            log,
+        )
+        llm = FakeLLM(
+            [
+                {"sentence": "Mijn dokter komt.", "words_used": ["dokter"]},
+                {"sentence": "Mijn dokter komt.", "words_used": ["dokter"]},
             ]
         )
         runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
         round_data = runner.prepare_next_round()
-        self.assertIsNone(round_data)
-        self.assertIn(1, runner.dropped_card_ids)
+        assert round_data is not None
+        self.assertEqual([row.card_id for row in round_data.rows], [1])
+        self.assertEqual(llm.calls, 2)
 
     def test_answer_calls_complete_before_next_query(self) -> None:
         log: list[tuple[str, int | str]] = []
@@ -166,9 +199,9 @@ class SessionTests(unittest.TestCase):
         runner.commit_round(round_data, {1: "good", 2: "easy"})
         runner.prepare_next_round()
 
-        self.assertEqual(log[0][0], "query")
+        self.assertEqual(log[0], ("queue_fetch", 4))
         self.assertEqual(log[1:3], [("answer", 1), ("answer", 2)])
-        self.assertEqual(log[3][0], "query")
+        self.assertEqual(log[3], ("queue_fetch", 4))
 
     def test_llm_unavailable_bubbles_up(self) -> None:
         log: list[tuple[str, int | str]] = []
