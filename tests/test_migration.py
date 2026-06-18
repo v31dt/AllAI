@@ -5,6 +5,8 @@ import unittest
 from migration import (
     MODE_COPY_KEEP,
     MODE_COPY_SUSPEND,
+    build_migration_card_query,
+    collect_note_ids_for_migration,
     detect_migration_source,
     extract_langcard_data,
     mode_suspends_originals,
@@ -14,7 +16,27 @@ from migration import (
 
 
 class FakeNote(dict):
-    pass
+    def has_tag(self, tag: str) -> bool:
+        tags = self.get("tags", "")
+        return tag in tags.split()
+
+
+class FakeCard:
+    def __init__(self, card_id: int, note_id: int) -> None:
+        self.id = card_id
+        self.nid = note_id
+
+
+class FakeCollection:
+    def __init__(self, query_results: dict[str, list[int]], cards: dict[int, FakeCard]) -> None:
+        self.query_results = query_results
+        self.cards = cards
+
+    def find_cards(self, query: str) -> list[int]:
+        return list(self.query_results.get(query, []))
+
+    def get_card(self, card_id: int) -> FakeCard:
+        return self.cards[card_id]
 
 
 class MigrationParserTests(unittest.TestCase):
@@ -75,6 +97,24 @@ class MigrationParserTests(unittest.TestCase):
         note = FakeNote(Front="woord", Back="meaning <br> example", Hint="")
         source = detect_migration_source(note)
         self.assertEqual(source.kind, "front_back")
+
+    def test_build_migration_card_query(self) -> None:
+        self.assertEqual(
+            build_migration_card_query("dutch cursus", "Basic (and reversed card)"),
+            'deck:"dutch cursus" note:"Basic (and reversed card)"',
+        )
+
+    def test_collect_note_ids_for_migration_dedupes_reversed_cards(self) -> None:
+        query = 'deck:"dutch cursus" note:"Basic (and reversed card)"'
+        col = FakeCollection(
+            query_results={query: [1, 2, 3]},
+            cards={
+                1: FakeCard(1, 100),
+                2: FakeCard(2, 100),
+                3: FakeCard(3, 101),
+            },
+        )
+        self.assertEqual(collect_note_ids_for_migration(col, "dutch cursus", "Basic (and reversed card)"), [100, 101])
 
 
 if __name__ == "__main__":

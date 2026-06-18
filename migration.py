@@ -174,20 +174,41 @@ def mode_suspends_originals(mode: str) -> bool:
     return mode == MODE_COPY_SUSPEND
 
 
+def build_migration_card_query(source_deck_name: str, source_notetype_name: str) -> str:
+    return f'deck:"{source_deck_name}" note:"{source_notetype_name}"'
+
+
+def collect_note_ids_for_migration(col: Any, source_deck_name: str, source_notetype_name: str) -> list[int]:
+    query = build_migration_card_query(source_deck_name, source_notetype_name)
+    note_ids: list[int] = []
+    seen: set[int] = set()
+    for card_id in col.find_cards(query):
+        note_id = int(col.get_card(card_id).nid)
+        if note_id in seen:
+            continue
+        seen.add(note_id)
+        note_ids.append(note_id)
+    return note_ids
+
+
 def migrate_notes(
     mw: Any,
     *,
+    source_deck_name: str,
     source_notetype_name: str,
     destination_deck_name: str,
     mode: str,
 ) -> MigrationResult:
     result = MigrationResult()
-    note_ids = mw.col.find_notes(f'note:"{source_notetype_name}" -tag:{MIGRATION_TAG}')
+    note_ids = collect_note_ids_for_migration(mw.col, source_deck_name, source_notetype_name)
     langcard_notetype = ensure_langcard_notetype(mw.col)
     destination_deck_id = ensure_deck_id(mw.col, destination_deck_name)
 
     for note_id in note_ids:
         note = mw.col.get_note(note_id)
+        if note.has_tag(MIGRATION_TAG):
+            result.skipped += 1
+            continue
         try:
             parsed = extract_langcard_data(note)
         except ValueError:
@@ -281,6 +302,7 @@ class MigrationDialog(QDialog):
         self.setWindowTitle("AllAI Migration")
         self.resize(560, 220)
         self.note_type_combo = QComboBox()
+        self.source_deck_combo = QComboBox()
         self.deck_combo = QComboBox()
         self.mode_combo = QComboBox()
         self.source_summary_label = QLabel()
@@ -303,6 +325,7 @@ class MigrationDialog(QDialog):
         self.mode_combo.addItem("Create LangCard copies without suspending originals", MODE_COPY_KEEP)
         self.mode_combo.addItem("Convert in place when Target/Native/Example already exist", MODE_IN_PLACE)
         form.addRow("Source note type", self.note_type_combo)
+        form.addRow("Source deck", self.source_deck_combo)
         self.source_summary_label.setWordWrap(True)
         form.addRow("Detected source", self.source_summary_label)
         form.addRow("Destination deck", self.deck_combo)
@@ -319,7 +342,7 @@ class MigrationDialog(QDialog):
         for notetype in sorted(self.mw.col.models.all(), key=lambda model: model["name"].casefold()):
             self.note_type_combo.addItem(notetype["name"], notetype["name"])
         self._update_source_summary()
-        self._populate_decks()
+        self._populate_deck_combos()
 
     def _update_source_summary(self) -> None:
         notetype_name = self.note_type_combo.currentData()
@@ -336,18 +359,27 @@ class MigrationDialog(QDialog):
         except ValueError as exc:
             self.source_summary_label.setText(str(exc))
 
-    def _populate_decks(self) -> None:
+    def _populate_deck_combos(self) -> None:
+        self.source_deck_combo.clear()
         self.deck_combo.clear()
         for deck in sorted(self.mw.col.decks.all(), key=lambda deck_: deck_["name"].casefold()):
+            self.source_deck_combo.addItem(deck["name"], deck["name"])
             self.deck_combo.addItem(deck["name"], deck["name"])
+        source_index = self.source_deck_combo.findData("dutch cursus")
+        if source_index >= 0:
+            self.source_deck_combo.setCurrentIndex(source_index)
+        destination_index = self.deck_combo.findData("dutch cursus")
+        if destination_index >= 0:
+            self.deck_combo.setCurrentIndex(destination_index)
 
     def _run_migration(self) -> None:
         source_notetype_name = self.note_type_combo.currentData()
+        source_deck_name = self.source_deck_combo.currentData()
         destination_deck_name = self.deck_combo.currentData()
         mode = self.mode_combo.currentData()
 
-        if not source_notetype_name or not destination_deck_name:
-            showWarning("Select a source note type and destination deck.")
+        if not source_notetype_name or not source_deck_name or not destination_deck_name:
+            showWarning("Select a source note type, source deck, and destination deck.")
             return
         if source_notetype_name == NOTE_TYPE_NAME and mode in (MODE_COPY_SUSPEND, MODE_COPY_KEEP):
             showWarning("Source note type is already LangCard.")
@@ -363,6 +395,7 @@ class MigrationDialog(QDialog):
 
         result = migrate_notes(
             self.mw,
+            source_deck_name=source_deck_name,
             source_notetype_name=source_notetype_name,
             destination_deck_name=destination_deck_name,
             mode=mode,
