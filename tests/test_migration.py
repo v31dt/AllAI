@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from migration import parse_pipe_text
+from migration import parse_front_back_fields, parse_pipe_text
 
 
 class MigrationParserTests(unittest.TestCase):
@@ -21,6 +21,15 @@ class MigrationParserTests(unittest.TestCase):
     def test_parse_pipe_text_rejects_missing_pipe(self) -> None:
         with self.assertRaises(ValueError):
             parse_pipe_text("dokter doctor")
+
+    def test_parse_front_back_fields(self) -> None:
+        parsed = parse_front_back_fields(
+            "gesneden",
+            'sliced <br> Het brood is gesneden. – "The bread is sliced."',
+        )
+        self.assertEqual(parsed.target, "gesneden")
+        self.assertEqual(parsed.native, "sliced")
+        self.assertEqual(parsed.example, 'Het brood is gesneden. – "The bread is sliced."')
 
 
 if __name__ == "__main__":

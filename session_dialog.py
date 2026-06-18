@@ -157,7 +157,7 @@ class SessionDialog(QDialog):
 
         if self.current_round is None:
             if self.runner.completed_rounds == 0 and show_empty_message:
-                showInfo("Nothing due.")
+                showInfo(self.runner.explain_why_no_cards())
             else:
                 self._show_summary()
             self.accept()

@@ -5,7 +5,7 @@
     "model": "gpt-4o-mini"
   },
   "decks": [
-    "Dutch"
+    "dutch cursus"
   ],
   "session": {
     "words_per_sentence": 4,

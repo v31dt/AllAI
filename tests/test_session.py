@@ -7,7 +7,9 @@ from session import (
     SentenceGenerationError,
     SessionRunner,
     build_card_payload,
+    build_deck_filter,
     build_search_query,
+    build_state_query,
     highlight_sentence,
     match_words_to_payloads,
 )
@@ -54,6 +56,21 @@ class FakeCollection:
         return self.cards_by_id[card_id]
 
 
+class ExplainCollection(FakeCollection):
+    def __init__(
+        self,
+        cards: list[FakeCard],
+        log: list[tuple[str, int | str]],
+        responses: dict[str, list[int]],
+    ) -> None:
+        super().__init__(cards, log)
+        self.responses = responses
+
+    def find_cards(self, query: str) -> list[int]:
+        self.log.append(("query", query))
+        return list(self.responses.get(query, []))
+
+
 class FakeLLM:
     def __init__(self, responses: list[dict | Exception]) -> None:
         self.responses = responses
@@ -77,6 +94,8 @@ class SessionTests(unittest.TestCase):
             build_search_query(["Dutch", "Chinese"], False),
             '(is:due -is:new) (deck:"Dutch" OR deck:"Chinese") note:LangCard',
         )
+        self.assertEqual(build_state_query(True), "(is:due OR is:new)")
+        self.assertEqual(build_deck_filter(["Dutch", "Chinese"]), 'deck:"Dutch" OR deck:"Chinese"')
 
     def test_match_words_to_payloads_uses_exact_casefold_and_punctuation_matching(self) -> None:
         payloads = [
@@ -158,6 +177,17 @@ class SessionTests(unittest.TestCase):
         runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
         with self.assertRaises(LLMUnavailableError):
             runner.prepare_next_round()
+
+    def test_explain_why_no_cards_mentions_langcard_mismatch(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        responses = {
+            '(is:due OR is:new) (deck:"dutch cursus")': [1, 2, 3],
+            '(is:due OR is:new) (deck:"dutch cursus") note:LangCard': [],
+        }
+        col = ExplainCollection([], log, responses)
+        runner = SessionRunner(col, {"decks": ["dutch cursus"]}, FakeLLM([]))
+        message = runner.explain_why_no_cards()
+        self.assertIn("none of them use the LangCard note type", message)
 
 
 if __name__ == "__main__":

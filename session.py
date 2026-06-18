@@ -19,7 +19,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_key": "",
         "model": "gpt-4o-mini",
     },
-    "decks": ["Dutch"],
+    "decks": ["dutch cursus"],
     "session": {
         "words_per_sentence": 4,
         "include_new_cards": True,
@@ -111,9 +111,20 @@ def build_search_query(decks: Sequence[str], include_new_cards: bool) -> str:
     usable_decks = [deck.strip() for deck in decks if deck.strip()]
     if not usable_decks:
         raise ValueError("At least one deck must be configured.")
-    deck_filter = " OR ".join(f'deck:"{deck}"' for deck in usable_decks)
-    state = "(is:due OR is:new)" if include_new_cards else "(is:due -is:new)"
+    deck_filter = build_deck_filter(usable_decks)
+    state = build_state_query(include_new_cards)
     return f"{state} ({deck_filter}) note:{NOTE_TYPE_NAME}"
+
+
+def build_deck_filter(decks: Sequence[str]) -> str:
+    usable_decks = [deck.strip() for deck in decks if deck.strip()]
+    if not usable_decks:
+        raise ValueError("At least one deck must be configured.")
+    return " OR ".join(f'deck:"{deck}"' for deck in usable_decks)
+
+
+def build_state_query(include_new_cards: bool) -> str:
+    return "(is:due OR is:new)" if include_new_cards else "(is:due -is:new)"
 
 
 def build_generation_prompt(words: Sequence[str]) -> str:
@@ -324,6 +335,23 @@ class SessionRunner:
         messages = list(self._messages)
         self._messages.clear()
         return messages
+
+    def explain_why_no_cards(self) -> str:
+        decks = self.config.get("decks", [])
+        include_new_cards = bool(self.config["session"]["include_new_cards"])
+        state_query = build_state_query(include_new_cards)
+        deck_filter = build_deck_filter(decks)
+        any_cards_query = f"{state_query} ({deck_filter})"
+        langcard_query = f"{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME}"
+
+        any_matching = len(self.col.find_cards(any_cards_query))
+        langcard_matching = len(self.col.find_cards(langcard_query))
+        if any_matching > 0 and langcard_matching == 0:
+            return (
+                "The configured deck has due/new cards, but none of them use the LangCard note type. "
+                "Run Tools -> AllAI -> Migrate notes first, or import cards as LangCard."
+            )
+        return "Nothing due."
 
     def _select_batch(self) -> list[Any]:
         batch_size = int(self.config["session"]["words_per_sentence"])

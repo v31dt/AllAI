@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +36,7 @@ except ImportError:  # pragma: no cover - allows parser tests
 MIGRATION_TAG = "allai:migrated"
 MODE_COPY = "copy"
 MODE_IN_PLACE = "in_place"
+_HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
 
 
 @dataclass
@@ -62,6 +64,31 @@ def parse_pipe_text(text: str) -> ParsedPipeNote:
 
     native, example = _split_trailing_parenthetical(right)
     return ParsedPipeNote(target=target, native=native.strip(), example=example.strip())
+
+
+def parse_front_back_fields(front: str, back: str) -> ParsedPipeNote:
+    target = front.strip()
+    if not target:
+        raise ValueError("Missing front/target text.")
+
+    parts = [part.strip() for part in _HTML_BREAK_RE.split(back) if part.strip()]
+    if not parts:
+        raise ValueError("Missing back/native text.")
+
+    native = parts[0]
+    example = parts[1] if len(parts) > 1 else ""
+    return ParsedPipeNote(target=target, native=native, example=example)
+
+
+def extract_langcard_data(note: Any, source_field_name: str) -> ParsedPipeNote:
+    raw_value = note[source_field_name]
+    if "|" in raw_value:
+        return parse_pipe_text(raw_value)
+
+    if source_field_name == "Front" and "Back" in note:
+        return parse_front_back_fields(note["Front"], note["Back"])
+
+    raise ValueError("Unsupported note format for migration.")
 
 
 def _split_trailing_parenthetical(text: str) -> tuple[str, str]:
@@ -111,7 +138,7 @@ def migrate_notes(
             result.skipped += 1
             continue
         try:
-            parsed = parse_pipe_text(note[source_field_name])
+            parsed = extract_langcard_data(note, source_field_name)
         except ValueError:
             result.skipped += 1
             continue
@@ -215,8 +242,9 @@ class MigrationDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Migrate pipe-format notes into LangCard notes. "
-            "Rows that do not match `target | native (example)` will be skipped."
+            "Migrate notes into LangCard notes. "
+            "Supported formats: `target | native (example)` in one field, or "
+            "`Front=target` with `Back=native <br> example`."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
