@@ -13,7 +13,6 @@ except ImportError:  # pragma: no cover
 
 try:
     from aqt.qt import (
-        QCheckBox,
         QComboBox,
         QDialog,
         QDialogButtonBox,
@@ -23,7 +22,6 @@ try:
     )
     from aqt.utils import showInfo, showWarning
 except ImportError:  # pragma: no cover - allows parser tests
-    QCheckBox = None
     QComboBox = None
     QDialog = object
     QDialogButtonBox = None
@@ -34,7 +32,8 @@ except ImportError:  # pragma: no cover - allows parser tests
     showWarning = None
 
 MIGRATION_TAG = "allai:migrated"
-MODE_COPY = "copy"
+MODE_COPY_SUSPEND = "copy_suspend"
+MODE_COPY_KEEP = "copy_keep"
 MODE_IN_PLACE = "in_place"
 _HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
 
@@ -122,6 +121,10 @@ def ensure_deck_id(col: Any, deck_name: str) -> int:
     return int(col.decks.add_normal_deck_with_name(deck_name).id)
 
 
+def mode_suspends_originals(mode: str) -> bool:
+    return mode == MODE_COPY_SUSPEND
+
+
 def migrate_notes(
     mw: Any,
     *,
@@ -129,7 +132,6 @@ def migrate_notes(
     source_field_name: str,
     destination_deck_name: str,
     mode: str,
-    suspend_originals: bool,
 ) -> MigrationResult:
     result = MigrationResult()
     note_ids = mw.col.find_notes(f'note:"{source_notetype_name}" -tag:{MIGRATION_TAG}')
@@ -164,7 +166,7 @@ def migrate_notes(
                     langcard_notetype=langcard_notetype,
                     destination_deck_id=destination_deck_id,
                     parsed=parsed,
-                    suspend_originals=suspend_originals,
+                    suspend_originals=mode_suspends_originals(mode),
                 )
             result.migrated += 1
         except Exception:
@@ -237,8 +239,6 @@ class MigrationDialog(QDialog):
         self.field_combo = QComboBox()
         self.deck_combo = QComboBox()
         self.mode_combo = QComboBox()
-        self.suspend_checkbox = QCheckBox("Suspend original cards after migration")
-        self.suspend_checkbox.setChecked(True)
         self._build_ui()
         self._populate_note_types()
         self.note_type_combo.currentIndexChanged.connect(self._populate_fields)
@@ -254,14 +254,14 @@ class MigrationDialog(QDialog):
         layout.addWidget(intro)
 
         form = QFormLayout()
-        self.mode_combo.addItem("Create LangCard copies and suspend originals", MODE_COPY)
+        self.mode_combo.addItem("Create LangCard copies and suspend originals", MODE_COPY_SUSPEND)
+        self.mode_combo.addItem("Create LangCard copies without suspending originals", MODE_COPY_KEEP)
         self.mode_combo.addItem("Convert in place when Target/Native/Example already exist", MODE_IN_PLACE)
         form.addRow("Source note type", self.note_type_combo)
         form.addRow("Source field", self.field_combo)
         form.addRow("Destination deck", self.deck_combo)
         form.addRow("Mode", self.mode_combo)
         layout.addLayout(form)
-        layout.addWidget(self.suspend_checkbox)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self._run_migration)
@@ -296,12 +296,11 @@ class MigrationDialog(QDialog):
         source_field_name = self.field_combo.currentData()
         destination_deck_name = self.deck_combo.currentData()
         mode = self.mode_combo.currentData()
-        suspend_originals = self.suspend_checkbox.isChecked()
 
         if not source_notetype_name or not source_field_name or not destination_deck_name:
             showWarning("Select a source note type, field, and destination deck.")
             return
-        if source_notetype_name == NOTE_TYPE_NAME and mode == MODE_COPY:
+        if source_notetype_name == NOTE_TYPE_NAME and mode in (MODE_COPY_SUSPEND, MODE_COPY_KEEP):
             showWarning("Source note type is already LangCard.")
             return
 
@@ -311,7 +310,6 @@ class MigrationDialog(QDialog):
             source_field_name=source_field_name,
             destination_deck_name=destination_deck_name,
             mode=mode,
-            suspend_originals=suspend_originals,
         )
         showInfo(
             f"Migration finished.\n\nMigrated: {result.migrated}\nSkipped: {result.skipped}\nFailures: {result.failures}"

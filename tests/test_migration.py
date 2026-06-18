@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from migration import parse_front_back_fields, parse_pipe_text
+from migration import MODE_COPY_KEEP, MODE_COPY_SUSPEND, mode_suspends_originals, parse_front_back_fields, parse_pipe_text
 
 
 class MigrationParserTests(unittest.TestCase):
@@ -42,6 +42,10 @@ class MigrationParserTests(unittest.TestCase):
         self.assertEqual(parsed.target, "gesneden")
         self.assertEqual(parsed.native, "sliced")
         self.assertEqual(parsed.example, 'Het brood is gesneden. – "The bread is sliced."')
+
+    def test_mode_suspends_originals(self) -> None:
+        self.assertTrue(mode_suspends_originals(MODE_COPY_SUSPEND))
+        self.assertFalse(mode_suspends_originals(MODE_COPY_KEEP))
 
 
 if __name__ == "__main__":
