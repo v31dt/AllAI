@@ -13,11 +13,11 @@ except ImportError:  # pragma: no cover - allows pure-Python tests
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .migration import MigrationDialog
     from .note_type import ensure_langcard_notetype
-    from .session_dialog import SessionDialog
+    from .session_dialog import SessionDialog, SessionLaunchDialog
 except ImportError:  # pragma: no cover
     from migration import MigrationDialog
     from note_type import ensure_langcard_notetype
-    from session_dialog import SessionDialog
+    from session_dialog import SessionDialog, SessionLaunchDialog
 
 MENU_TITLE = "AllAI"
 
@@ -25,7 +25,10 @@ MENU_TITLE = "AllAI"
 def _show_session_dialog() -> None:
     if mw is None or mw.col is None:
         return
-    dialog = SessionDialog(mw)
+    launch = SessionLaunchDialog(mw)
+    if launch.exec() != 1:
+        return
+    dialog = SessionDialog(mw, decks_override=launch.selected_decks())
     dialog.exec()
 
 

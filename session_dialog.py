@@ -5,7 +5,10 @@ from typing import Any
 
 from aqt.qt import (
     QApplication,
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -33,6 +36,47 @@ except ImportError:  # pragma: no cover
 
 FILTERED_DECK_NAME = "AllAI Session"
 FILTERED_ORDER_DUE = 6
+ALL_CONFIGURED_DECKS = "__all_configured__"
+
+
+class SessionLaunchDialog(QDialog):
+    def __init__(self, mw: Any) -> None:
+        super().__init__(mw)
+        self.mw = mw
+        self.config = self._load_config()
+        self.deck_combo = QComboBox()
+        self.setWindowTitle("Start AllAI Session")
+        self.resize(420, 120)
+        self._build_ui()
+
+    def _load_config(self) -> dict[str, Any]:
+        current = self.mw.addonManager.getConfig(__name__) or {}
+        return deep_merge_config(DEFAULT_CONFIG, current)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        configured = [deck for deck in self.config.get("decks", []) if deck]
+        if len(configured) > 1:
+            self.deck_combo.addItem("All configured decks", ALL_CONFIGURED_DECKS)
+        for deck_name in configured:
+            self.deck_combo.addItem(deck_name, deck_name)
+        if not configured:
+            for deck in sorted(self.mw.col.decks.all(), key=lambda item: item["name"].casefold()):
+                self.deck_combo.addItem(deck["name"], deck["name"])
+        form.addRow("Run session for", self.deck_combo)
+        layout.addLayout(form)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def selected_decks(self) -> list[str]:
+        value = self.deck_combo.currentData()
+        if value == ALL_CONFIGURED_DECKS:
+            return list(self.config.get("decks", []))
+        return [value] if value else list(self.config.get("decks", []))
 
 
 class WordRowWidget(QWidget):
@@ -95,10 +139,12 @@ class WordRowWidget(QWidget):
 
 
 class SessionDialog(QDialog):
-    def __init__(self, mw: Any) -> None:
+    def __init__(self, mw: Any, decks_override: list[str] | None = None) -> None:
         super().__init__(mw)
         self.mw = mw
         self.config = self._load_config()
+        if decks_override:
+            self.config["decks"] = decks_override
         self.previous_deck_id = int(self.mw.col.decks.selected())
         self.session_deck_id: int | None = None
         self._session_cleaned_up = False
@@ -289,6 +335,8 @@ class SessionDialog(QDialog):
         if self.session_deck_id is not None:
             self.mw.col.sched.empty_filtered_deck(self.session_deck_id)
         self.mw.col.decks.select(self.previous_deck_id)
+        if self.session_deck_id is not None:
+            self.mw.col.decks.remove([self.session_deck_id])
         self.mw.reset()
 
     def reject(self) -> None:
