@@ -52,6 +52,12 @@ class MigrationResult:
     failures: int = 0
 
 
+@dataclass
+class MigrationSource:
+    kind: str
+    detail: str
+
+
 def parse_pipe_text(text: str) -> ParsedPipeNote:
     if "|" not in text:
         raise ValueError("Missing pipe delimiter.")
@@ -76,14 +82,37 @@ def parse_front_back_fields(front: str, back: str) -> ParsedPipeNote:
     return ParsedPipeNote(target=target, native=native, example=example)
 
 
-def extract_langcard_data(note: Any, source_field_name: str) -> ParsedPipeNote:
-    raw_value = note[source_field_name]
-    if "|" in raw_value:
-        return parse_pipe_text(raw_value)
+def detect_migration_source(note_or_notetype: Any) -> MigrationSource:
+    field_names = list(_field_names(note_or_notetype))
+    if "Front" in field_names and "Back" in field_names:
+        return MigrationSource(kind="front_back", detail="Front -> Target, Back -> Native + Example")
+    if all(field_name in field_names for field_name in (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD)):
+        return MigrationSource(kind="langcard_fields", detail="Target/Native/Example fields")
 
-    if source_field_name == "Front" and "Back" in note:
+    pipe_fields = _pipe_candidate_fields(note_or_notetype, field_names)
+    if len(pipe_fields) == 1:
+        return MigrationSource(kind="packed_field", detail=f"Packed field: {pipe_fields[0]}")
+    if len(pipe_fields) > 1:
+        raise ValueError(
+            "Multiple fields look like packed `target | native` text. "
+            "Rename or simplify the note type before migrating."
+        )
+    raise ValueError("Could not detect a supported note structure for migration.")
+
+
+def extract_langcard_data(note: Any) -> ParsedPipeNote:
+    source = detect_migration_source(note)
+    if source.kind == "front_back":
         return parse_front_back_fields(note["Front"], note["Back"])
-
+    if source.kind == "langcard_fields":
+        return ParsedPipeNote(
+            target=note[TARGET_FIELD].strip(),
+            native=note[NATIVE_FIELD].strip(),
+            example=note[EXAMPLE_FIELD].strip(),
+        )
+    if source.kind == "packed_field":
+        field_name = source.detail.removeprefix("Packed field: ").strip()
+        return parse_pipe_text(note[field_name])
     raise ValueError("Unsupported note format for migration.")
 
 
@@ -110,8 +139,28 @@ def _split_trailing_parenthetical(text: str) -> tuple[str, str]:
 def _split_native_and_example(text: str) -> tuple[str, str]:
     parts = [part.strip() for part in _HTML_BREAK_RE.split(text) if part.strip()]
     if len(parts) >= 2:
-        return parts[0], parts[1]
+        return parts[0], " <br> ".join(parts[1:])
     return _split_trailing_parenthetical(text)
+
+
+def _field_names(note_or_notetype: Any) -> list[str]:
+    if isinstance(note_or_notetype, dict) and "flds" in note_or_notetype:
+        return [field["name"] for field in note_or_notetype["flds"]]
+    if hasattr(note_or_notetype, "keys"):
+        return list(note_or_notetype.keys())
+    return []
+
+
+def _pipe_candidate_fields(note_or_notetype: Any, field_names: list[str] | None = None) -> list[str]:
+    names = field_names or _field_names(note_or_notetype)
+    if isinstance(note_or_notetype, dict) and "flds" in note_or_notetype:
+        return [name for name in names if name not in ("Front", "Back", "Hint")]
+    candidates: list[str] = []
+    for name in names:
+        value = str(note_or_notetype[name]).strip()
+        if "|" in value:
+            candidates.append(name)
+    return candidates
 
 
 def ensure_deck_id(col: Any, deck_name: str) -> int:
@@ -129,7 +178,6 @@ def migrate_notes(
     mw: Any,
     *,
     source_notetype_name: str,
-    source_field_name: str,
     destination_deck_name: str,
     mode: str,
 ) -> MigrationResult:
@@ -140,11 +188,8 @@ def migrate_notes(
 
     for note_id in note_ids:
         note = mw.col.get_note(note_id)
-        if source_field_name not in note:
-            result.skipped += 1
-            continue
         try:
-            parsed = extract_langcard_data(note, source_field_name)
+            parsed = extract_langcard_data(note)
         except ValueError:
             result.skipped += 1
             continue
@@ -236,19 +281,19 @@ class MigrationDialog(QDialog):
         self.setWindowTitle("AllAI Migration")
         self.resize(560, 220)
         self.note_type_combo = QComboBox()
-        self.field_combo = QComboBox()
         self.deck_combo = QComboBox()
         self.mode_combo = QComboBox()
+        self.source_summary_label = QLabel()
         self._build_ui()
         self._populate_note_types()
-        self.note_type_combo.currentIndexChanged.connect(self._populate_fields)
+        self.note_type_combo.currentIndexChanged.connect(self._update_source_summary)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         intro = QLabel(
             "Migrate notes into LangCard notes. "
-            "Supported formats: `target | native (example)` in one field, or "
-            "`Front=target` with `Back=native <br> example`."
+            "The parser auto-detects supported note structures such as `Front/Back` "
+            "or packed `target | native <br> example` fields."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -258,7 +303,8 @@ class MigrationDialog(QDialog):
         self.mode_combo.addItem("Create LangCard copies without suspending originals", MODE_COPY_KEEP)
         self.mode_combo.addItem("Convert in place when Target/Native/Example already exist", MODE_IN_PLACE)
         form.addRow("Source note type", self.note_type_combo)
-        form.addRow("Source field", self.field_combo)
+        self.source_summary_label.setWordWrap(True)
+        form.addRow("Detected source", self.source_summary_label)
         form.addRow("Destination deck", self.deck_combo)
         form.addRow("Mode", self.mode_combo)
         layout.addLayout(form)
@@ -272,19 +318,23 @@ class MigrationDialog(QDialog):
         self.note_type_combo.clear()
         for notetype in sorted(self.mw.col.models.all(), key=lambda model: model["name"].casefold()):
             self.note_type_combo.addItem(notetype["name"], notetype["name"])
-        self._populate_fields()
+        self._update_source_summary()
         self._populate_decks()
 
-    def _populate_fields(self) -> None:
-        self.field_combo.clear()
+    def _update_source_summary(self) -> None:
         notetype_name = self.note_type_combo.currentData()
         if not notetype_name:
+            self.source_summary_label.setText("")
             return
         notetype = self.mw.col.models.by_name(notetype_name)
         if not notetype:
+            self.source_summary_label.setText("")
             return
-        for field in notetype["flds"]:
-            self.field_combo.addItem(field["name"], field["name"])
+        try:
+            source = detect_migration_source(notetype)
+            self.source_summary_label.setText(source.detail)
+        except ValueError as exc:
+            self.source_summary_label.setText(str(exc))
 
     def _populate_decks(self) -> None:
         self.deck_combo.clear()
@@ -293,21 +343,27 @@ class MigrationDialog(QDialog):
 
     def _run_migration(self) -> None:
         source_notetype_name = self.note_type_combo.currentData()
-        source_field_name = self.field_combo.currentData()
         destination_deck_name = self.deck_combo.currentData()
         mode = self.mode_combo.currentData()
 
-        if not source_notetype_name or not source_field_name or not destination_deck_name:
-            showWarning("Select a source note type, field, and destination deck.")
+        if not source_notetype_name or not destination_deck_name:
+            showWarning("Select a source note type and destination deck.")
             return
         if source_notetype_name == NOTE_TYPE_NAME and mode in (MODE_COPY_SUSPEND, MODE_COPY_KEEP):
             showWarning("Source note type is already LangCard.")
+            return
+        try:
+            notetype = self.mw.col.models.by_name(source_notetype_name)
+            if notetype is None:
+                raise ValueError("Source note type was not found.")
+            detect_migration_source(notetype)
+        except ValueError as exc:
+            showWarning(str(exc))
             return
 
         result = migrate_notes(
             self.mw,
             source_notetype_name=source_notetype_name,
-            source_field_name=source_field_name,
             destination_deck_name=destination_deck_name,
             mode=mode,
         )

@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import unittest
 
-from migration import MODE_COPY_KEEP, MODE_COPY_SUSPEND, mode_suspends_originals, parse_front_back_fields, parse_pipe_text
+from migration import (
+    MODE_COPY_KEEP,
+    MODE_COPY_SUSPEND,
+    detect_migration_source,
+    extract_langcard_data,
+    mode_suspends_originals,
+    parse_front_back_fields,
+    parse_pipe_text,
+)
+
+
+class FakeNote(dict):
+    pass
 
 
 class MigrationParserTests(unittest.TestCase):
@@ -46,6 +58,23 @@ class MigrationParserTests(unittest.TestCase):
     def test_mode_suspends_originals(self) -> None:
         self.assertTrue(mode_suspends_originals(MODE_COPY_SUSPEND))
         self.assertFalse(mode_suspends_originals(MODE_COPY_KEEP))
+
+    def test_extract_langcard_data_from_front_back_note(self) -> None:
+        note = FakeNote(
+            Front="bijzin",
+            Back='subordinate clause; the finite verb moves to the end <br> '
+            'Ik doe een cursus omdat ik Nederlands wil leren. <br> Extra line',
+            Hint="",
+        )
+        parsed = extract_langcard_data(note)
+        self.assertEqual(parsed.target, "bijzin")
+        self.assertEqual(parsed.native, "subordinate clause; the finite verb moves to the end")
+        self.assertEqual(parsed.example, "Ik doe een cursus omdat ik Nederlands wil leren. <br> Extra line")
+
+    def test_detect_migration_source_prefers_front_back(self) -> None:
+        note = FakeNote(Front="woord", Back="meaning <br> example", Hint="")
+        source = detect_migration_source(note)
+        self.assertEqual(source.kind, "front_back")
 
 
 if __name__ == "__main__":
