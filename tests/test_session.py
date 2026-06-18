@@ -5,6 +5,7 @@ import unittest
 
 from session import (
     LLMUnavailableError,
+    RoundCommitError,
     SentenceGenerationError,
     SessionRunner,
     build_card_payload,
@@ -13,6 +14,7 @@ from session import (
     build_state_query,
     highlight_sentence,
     match_words_to_payloads,
+    parse_generation_payload,
 )
 
 
@@ -35,9 +37,17 @@ class FakeCard:
 
 
 class FakeSched:
-    def __init__(self, col: "FakeCollection", log: list[tuple[str, int | str]]) -> None:
+    def __init__(
+        self,
+        col: "FakeCollection",
+        log: list[tuple[str, int | str]],
+        *,
+        fail_on_answer_number: int | None = None,
+    ) -> None:
         self.col = col
         self.log = log
+        self.fail_on_answer_number = fail_on_answer_number
+        self.answer_calls = 0
 
     def get_queued_cards(self, fetch_limit: int = 1, intraday_learning_only: bool = False) -> SimpleNamespace:
         self.log.append(("queue_fetch", fetch_limit))
@@ -48,19 +58,34 @@ class FakeSched:
         return SimpleNamespace(cards=cards)
 
     def answerCard(self, card: FakeCard, ease: int) -> None:
+        self.answer_calls += 1
+        if self.fail_on_answer_number == self.answer_calls:
+            raise AssertionError("forced answer failure")
         if not self.col.queue_order or self.col.queue_order[0] != card.id:
             raise AssertionError("not at top of queue")
         self.col.queue_order.pop(0)
+        self.col._pending_undo_card_id = card.id
         self.log.append(("answer", card.id))
 
 
 class FakeCollection:
-    def __init__(self, cards: list[FakeCard], log: list[tuple[str, int | str]]) -> None:
+    def __init__(
+        self,
+        cards: list[FakeCard],
+        log: list[tuple[str, int | str]],
+        *,
+        fail_on_answer_number: int | None = None,
+        fail_undo: bool = False,
+    ) -> None:
         self.cards_by_id = {card.id: card for card in cards}
         self.card_order = [card.id for card in cards]
         self.queue_order = [card.id for card in cards]
         self.log = log
-        self.sched = FakeSched(self, log)
+        self.sched = FakeSched(self, log, fail_on_answer_number=fail_on_answer_number)
+        self.fail_undo = fail_undo
+        self._pending_undo_card_id: int | None = None
+        self._undo_entries: dict[int, list[int]] = {}
+        self._next_undo_entry = 1
 
     def find_cards(self, query: str) -> list[int]:
         self.log.append(("query", query))
@@ -68,6 +93,29 @@ class FakeCollection:
 
     def get_card(self, card_id: int) -> FakeCard:
         return self.cards_by_id[card_id]
+
+    def add_custom_undo_entry(self, name: str) -> int:
+        entry = self._next_undo_entry
+        self._next_undo_entry += 1
+        self._undo_entries[entry] = []
+        self.log.append(("undo_entry", name))
+        return entry
+
+    def merge_undo_entries(self, target: int) -> None:
+        if self._pending_undo_card_id is not None:
+            self._undo_entries[target].append(self._pending_undo_card_id)
+            self._pending_undo_card_id = None
+        self.log.append(("merge_undo", target))
+
+    def undo(self) -> None:
+        if self.fail_undo:
+            raise AssertionError("forced undo failure")
+        if not self._undo_entries:
+            return
+        target = max(self._undo_entries)
+        for card_id in reversed(self._undo_entries[target]):
+            self.queue_order.insert(0, card_id)
+        self.log.append(("undo", target))
 
 
 class ExplainCollection(FakeCollection):
@@ -117,8 +165,44 @@ class SessionTests(unittest.TestCase):
             build_card_payload(FakeCard(2, "Afspraak", "appointment")),
             build_card_payload(FakeCard(3, "fiets", "bike")),
         ]
-        rows, unmatched = match_words_to_payloads(payloads, ["dokter", "AFSPRAAK", "fiets."])
+        _, words_used = parse_generation_payload(
+            {
+                "sentence": "Mijn dokter plant een afspraak met de fiets.",
+                "words_used": ["dokter", "AFSPRAAK", "fiets."],
+            }
+        )
+        rows, unmatched = match_words_to_payloads(payloads, words_used)
         self.assertEqual([row.card_id for row in rows], [1, 2, 3])
+        self.assertEqual(unmatched, [])
+
+    def test_parse_generation_payload_accepts_target_surface_mapping(self) -> None:
+        sentence, words_used = parse_generation_payload(
+            {
+                "sentence": "Ik sprak gisteren met de dokter.",
+                "words_used": [{"target": "spreken", "surface": "sprak"}, {"target": "dokter", "surface": "dokter"}],
+            }
+        )
+        self.assertEqual(sentence, "Ik sprak gisteren met de dokter.")
+        self.assertEqual(words_used[0].target, "spreken")
+        self.assertEqual(words_used[0].surface, "sprak")
+
+    def test_match_words_to_payloads_prefers_explicit_target_mapping_for_inflection(self) -> None:
+        payloads = [
+            build_card_payload(FakeCard(1, "spreken", "to speak")),
+            build_card_payload(FakeCard(2, "dokter", "doctor")),
+        ]
+        _, words_used = parse_generation_payload(
+            {
+                "sentence": "Ik sprak met de dokter.",
+                "words_used": [
+                    {"target": "spreken", "surface": "sprak"},
+                    {"target": "dokter", "surface": "dokter"},
+                ],
+            }
+        )
+        rows, unmatched = match_words_to_payloads(payloads, words_used)
+        self.assertEqual([row.card_id for row in rows], [1, 2])
+        self.assertEqual([row.surface_form for row in rows], ["sprak", "dokter"])
         self.assertEqual(unmatched, [])
 
     def test_highlight_sentence_handles_whitespace_and_cjk_text(self) -> None:
@@ -199,9 +283,72 @@ class SessionTests(unittest.TestCase):
         runner.commit_round(round_data, {1: "good", 2: "easy"})
         runner.prepare_next_round()
 
-        self.assertEqual(log[0], ("queue_fetch", 4))
-        self.assertEqual(log[1:3], [("answer", 1), ("answer", 2)])
-        self.assertEqual(log[3], ("queue_fetch", 4))
+        queue_fetch_indexes = [index for index, entry in enumerate(log) if entry == ("queue_fetch", 4)]
+        answer_indexes = [index for index, entry in enumerate(log) if entry[0] == "answer"]
+        self.assertEqual(queue_fetch_indexes[0], 0)
+        self.assertEqual([log[index] for index in answer_indexes], [("answer", 1), ("answer", 2)])
+        self.assertTrue(all(index < queue_fetch_indexes[1] for index in answer_indexes))
+
+    def test_commit_round_rolls_back_partial_answers_when_later_answer_fails(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        cards = [
+            FakeCard(1, "dokter", "doctor", due=1),
+            FakeCard(2, "afspraak", "appointment", due=2),
+        ]
+        col = FakeCollection(cards, log, fail_on_answer_number=2)
+        llm = FakeLLM(
+            [
+                {
+                    "sentence": "Mijn dokter heeft een afspraak.",
+                    "words_used": [
+                        {"target": "dokter", "surface": "dokter"},
+                        {"target": "afspraak", "surface": "afspraak"},
+                    ],
+                }
+            ]
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
+        round_data = runner.prepare_next_round()
+        assert round_data is not None
+
+        with self.assertRaises(RoundCommitError) as exc:
+            runner.commit_round(round_data, {1: "good", 2: "easy"})
+
+        self.assertEqual(col.queue_order, [1, 2])
+        self.assertEqual(runner.reviewed_words, 0)
+        self.assertEqual(runner.completed_rounds, 0)
+        self.assertTrue(exc.exception.rollback_succeeded)
+        self.assertEqual(exc.exception.committed_count, 0)
+        self.assertIn(("undo", 1), log)
+
+    def test_commit_round_reports_when_partial_answers_cannot_be_rolled_back(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        cards = [
+            FakeCard(1, "dokter", "doctor", due=1),
+            FakeCard(2, "afspraak", "appointment", due=2),
+        ]
+        col = FakeCollection(cards, log, fail_on_answer_number=2, fail_undo=True)
+        llm = FakeLLM(
+            [
+                {
+                    "sentence": "Mijn dokter heeft een afspraak.",
+                    "words_used": [
+                        {"target": "dokter", "surface": "dokter"},
+                        {"target": "afspraak", "surface": "afspraak"},
+                    ],
+                }
+            ]
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
+        round_data = runner.prepare_next_round()
+        assert round_data is not None
+
+        with self.assertRaises(RoundCommitError) as exc:
+            runner.commit_round(round_data, {1: "good", 2: "easy"})
+
+        self.assertEqual(col.queue_order, [2])
+        self.assertFalse(exc.exception.rollback_succeeded)
+        self.assertEqual(exc.exception.committed_count, 1)
 
     def test_llm_unavailable_bubbles_up(self) -> None:
         log: list[tuple[str, int | str]] = []

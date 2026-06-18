@@ -38,7 +38,11 @@ Rules:
 - Do not translate or explain.
 
 Return ONLY JSON:
-{{"sentence": "...", "words_used": ["surface form 1", "surface form 2", ...]}}
+{{"sentence": "...", "words_used": [{{"target": "original target 1", "surface": "surface form 1"}}, ...]}}
+
+Rules for words_used:
+- target must exactly copy one of the provided words.
+- surface must be the actual form that appears in the sentence.
 
 If you cannot fit all words naturally, use the largest natural subset and list
 only those in words_used.
@@ -56,6 +60,31 @@ class LLMUnavailableError(Exception):
     pass
 
 
+class RoundCommitError(Exception):
+    def __init__(self, committed_count: int, rollback_succeeded: bool, original_error: Exception) -> None:
+        self.committed_count = committed_count
+        self.rollback_succeeded = rollback_succeeded
+        self.original_error = original_error
+
+        if committed_count == 0:
+            message = (
+                "Anki rejected the round before any answers were recorded. "
+                f"No reviews from this round were applied. Original error: {original_error}"
+            )
+        elif rollback_succeeded:
+            message = (
+                "Anki rejected the round after some answers were applied, but AllAI rolled them back. "
+                "No cards from this round were left half-reviewed. Start the session again."
+            )
+        else:
+            message = (
+                "Anki rejected the round after some answers were already applied, and automatic rollback failed. "
+                "Check the affected cards in normal review before restarting the session. "
+                f"Original error: {original_error}"
+            )
+        super().__init__(message)
+
+
 class SentenceGenerator(Protocol):
     def generate_sentence(self, prompt: str) -> dict[str, Any]:
         ...
@@ -69,6 +98,12 @@ class CardPayload:
     native: str
     example: str
     due: int
+
+
+@dataclass(frozen=True)
+class WordUsage:
+    target: str
+    surface: str
 
 
 @dataclass
@@ -221,15 +256,15 @@ def build_card_payload(card: Any) -> CardPayload:
 
 
 def match_words_to_payloads(
-    payloads: Sequence[CardPayload], words_used: Sequence[str]
+    payloads: Sequence[CardPayload], words_used: Sequence[WordUsage]
 ) -> tuple[list[RoundRow], list[CardPayload]]:
     remaining = {payload.card_id: payload for payload in payloads}
     matched_surfaces: dict[int, str] = {}
-    for surface in words_used:
-        match = _find_matching_payload(surface, remaining.values())
+    for usage in words_used:
+        match = _find_matching_payload(usage, remaining.values())
         if match is None:
             continue
-        matched_surfaces[match.card_id] = surface
+        matched_surfaces[match.card_id] = usage.surface
         remaining.pop(match.card_id, None)
     rows = [
         RoundRow(
@@ -246,28 +281,49 @@ def match_words_to_payloads(
     return rows, list(remaining.values())
 
 
-def _find_matching_payload(surface: str, payloads: Sequence[CardPayload]) -> CardPayload | None:
+def _find_matching_payload(usage: WordUsage, payloads: Sequence[CardPayload]) -> CardPayload | None:
     strategies = (
         lambda value: value,
         lambda value: value.casefold(),
         normalize_surface_form,
     )
     for strategy in strategies:
-        probe = strategy(surface.strip())
+        probe = strategy(usage.target.strip())
+        for payload in payloads:
+            if strategy(payload.target.strip()) == probe:
+                return payload
+    for strategy in strategies:
+        probe = strategy(usage.surface.strip())
         for payload in payloads:
             if strategy(payload.target.strip()) == probe:
                 return payload
     return None
 
 
-def parse_generation_payload(payload: dict[str, Any]) -> tuple[str, list[str]]:
+def parse_generation_payload(payload: dict[str, Any]) -> tuple[str, list[WordUsage]]:
     sentence = payload.get("sentence")
     words_used = payload.get("words_used")
     if not isinstance(sentence, str) or not sentence.strip():
         raise SentenceGenerationError("LLM response is missing a sentence.")
-    if not isinstance(words_used, list) or not all(isinstance(item, str) for item in words_used):
+    if not isinstance(words_used, list):
         raise SentenceGenerationError("LLM response is missing words_used.")
-    return sentence.strip(), [item.strip() for item in words_used if item.strip()]
+    usages: list[WordUsage] = []
+    for item in words_used:
+        if isinstance(item, str):
+            surface = item.strip()
+            if surface:
+                usages.append(WordUsage(target=surface, surface=surface))
+            continue
+        if not isinstance(item, dict):
+            raise SentenceGenerationError("LLM response has an invalid words_used entry.")
+        target = item.get("target")
+        surface = item.get("surface")
+        if not isinstance(target, str) or not target.strip():
+            raise SentenceGenerationError("LLM response has a words_used entry without a target.")
+        if not isinstance(surface, str) or not surface.strip():
+            raise SentenceGenerationError("LLM response has a words_used entry without a surface form.")
+        usages.append(WordUsage(target=target.strip(), surface=surface.strip()))
+    return sentence.strip(), usages
 
 
 class SessionRunner:
@@ -308,11 +364,34 @@ class SessionRunner:
         if missing:
             raise ValueError("All words in the round must be rated before commit.")
 
+        undo_entry = None
+        if hasattr(self.col, "add_custom_undo_entry") and hasattr(self.col, "merge_undo_entries"):
+            undo_entry = self.col.add_custom_undo_entry("AllAI round")
+
+        committed_count = 0
         for row in round_data.rows:
             rating = ratings[row.card_id]
             if rating not in EASE:
                 raise ValueError(f"Unknown rating: {rating}")
-            self.col.sched.answerCard(row.card, EASE[rating])
+            try:
+                self.col.sched.answerCard(row.card, EASE[rating])
+                committed_count += 1
+                if undo_entry is not None:
+                    self.col.merge_undo_entries(undo_entry)
+            except Exception as exc:
+                rollback_succeeded = False
+                if undo_entry is not None and committed_count > 0 and hasattr(self.col, "undo"):
+                    try:
+                        self.col.undo()
+                        rollback_succeeded = True
+                        committed_count = 0
+                    except Exception:
+                        rollback_succeeded = False
+                raise RoundCommitError(
+                    committed_count=committed_count,
+                    rollback_succeeded=rollback_succeeded,
+                    original_error=exc,
+                ) from exc
 
         self.reviewed_words += len(round_data.rows)
         self.completed_rounds += 1

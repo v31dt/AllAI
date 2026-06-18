@@ -25,6 +25,7 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .session import (
         DEFAULT_CONFIG,
         LLMUnavailableError,
+        RoundCommitError,
         RoundData,
         SessionRunner,
         build_search_query,
@@ -32,11 +33,31 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     )
 except ImportError:  # pragma: no cover
     from llm_client import OpenAICompatibleClient
-    from session import DEFAULT_CONFIG, LLMUnavailableError, RoundData, SessionRunner, build_search_query, deep_merge_config
+    from session import (
+        DEFAULT_CONFIG,
+        LLMUnavailableError,
+        RoundCommitError,
+        RoundData,
+        SessionRunner,
+        build_search_query,
+        deep_merge_config,
+    )
 
 FILTERED_DECK_NAME = "AllAI Session"
 FILTERED_ORDER_DUE = 6
 ALL_CONFIGURED_DECKS = "__all_configured__"
+
+
+def choose_session_deck_name(existing_decks: list[dict[str, Any]], base_name: str = FILTERED_DECK_NAME) -> str:
+    decks_by_name = {deck["name"]: deck for deck in existing_decks}
+    if base_name not in decks_by_name or decks_by_name[base_name].get("dyn"):
+        return base_name
+    suffix = 2
+    while True:
+        candidate = f"{base_name} {suffix}"
+        if candidate not in decks_by_name or decks_by_name[candidate].get("dyn"):
+            return candidate
+        suffix += 1
 
 
 class SessionLaunchDialog(QDialog):
@@ -204,13 +225,12 @@ class SessionDialog(QDialog):
         return deep_merge_config(DEFAULT_CONFIG, current)
 
     def _setup_session_deck(self) -> None:
-        existing = self.mw.col.decks.by_name(FILTERED_DECK_NAME)
-        if existing is not None and not existing.get("dyn"):
-            raise RuntimeError(f'Deck "{FILTERED_DECK_NAME}" already exists and is not filtered.')
+        deck_name = choose_session_deck_name(self.mw.col.decks.all())
+        existing = self.mw.col.decks.by_name(deck_name)
 
         existing_id = int(existing["id"]) if existing is not None else 0
         deck = self.mw.col.sched.get_or_create_filtered_deck(existing_id)
-        deck.name = FILTERED_DECK_NAME
+        deck.name = deck_name
         deck.allow_empty = True
         config = deck.config
         config.reschedule = True
@@ -294,7 +314,14 @@ class SessionDialog(QDialog):
             for widget in self.row_widgets
             if widget.rating is not None
         }
-        self.runner.commit_round(self.current_round, ratings)
+        try:
+            self.runner.commit_round(self.current_round, ratings)
+        except RoundCommitError as exc:
+            self.mw.reset()
+            self._cleanup_session_deck()
+            showWarning(str(exc))
+            super().reject()
+            return
         self.mw.reset()
         self._load_next_round(show_empty_message=False)
 
