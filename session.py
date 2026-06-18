@@ -18,7 +18,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_key": "",
         "model": "gpt-4o-mini",
     },
-    "decks": ["dutch cursus"],
+    "decks": [],
     "session": {
         "words_per_sentence": 4,
         "include_new_cards": True,
