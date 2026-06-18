@@ -1,0 +1,10 @@
+{
+  "package": "allai",
+  "name": "AllAI",
+  "mod": 0,
+  "min_point_version": 250904,
+  "max_point_version": 250904,
+  "human_version": "0.1.0",
+  "homepage": "https://github.com/v31dt/AllAI",
+  "conflicts": []
+}
