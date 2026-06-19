@@ -46,6 +46,12 @@ except ImportError:  # pragma: no cover
 FILTERED_DECK_NAME = "AllAI Session"
 FILTERED_ORDER_DUE = 6
 ALL_CONFIGURED_DECKS = "__all_configured__"
+RATING_SHORTCUTS = {
+    Qt.Key.Key_1: "again",
+    Qt.Key.Key_2: "hard",
+    Qt.Key.Key_3: "good",
+    Qt.Key.Key_4: "easy",
+}
 
 
 def choose_session_deck_name(existing_decks: list[dict[str, Any]], base_name: str = FILTERED_DECK_NAME) -> str:
@@ -58,6 +64,27 @@ def choose_session_deck_name(existing_decks: list[dict[str, Any]], base_name: st
         if candidate not in decks_by_name or decks_by_name[candidate].get("dyn"):
             return candidate
         suffix += 1
+
+
+def rating_for_key(key: int) -> str | None:
+    return RATING_SHORTCUTS.get(Qt.Key(key))
+
+
+def choose_next_active_row_index(row_widgets: list[Any], current_index: int | None) -> int | None:
+    if not row_widgets:
+        return None
+
+    start = 0 if current_index is None else current_index + 1
+    for index in range(start, len(row_widgets)):
+        widget = row_widgets[index]
+        if not widget.is_revealed() or widget.rating is None:
+            return index
+
+    for index, widget in enumerate(row_widgets):
+        if not widget.is_revealed() or widget.rating is None:
+            return index
+
+    return None
 
 
 class SessionLaunchDialog(QDialog):
@@ -101,11 +128,14 @@ class SessionLaunchDialog(QDialog):
 
 
 class WordRowWidget(QWidget):
-    def __init__(self, row: Any, on_change: Any) -> None:
+    def __init__(self, row: Any, on_change: Any, on_activate: Any) -> None:
         super().__init__()
         self.row = row
         self._on_change = on_change
+        self._on_activate = on_activate
         self._rating: str | None = None
+        self._active = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 6, 0, 6)
@@ -136,7 +166,14 @@ class WordRowWidget(QWidget):
     def rating(self) -> str | None:
         return self._rating
 
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if active:
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._apply_style()
+
     def _reveal(self) -> None:
+        self._on_activate(self)
         self.reveal_button.hide()
         self.native_label.show()
         for button in self.buttons.values():
@@ -144,19 +181,36 @@ class WordRowWidget(QWidget):
         self._on_change()
 
     def _set_rating(self, rating: str) -> None:
+        self._on_activate(self)
         self._rating = rating
         for name, button in self.buttons.items():
             button.setProperty("allai-active", name == rating)
             button.style().unpolish(button)
             button.style().polish(button)
-        if rating in ("again", "hard"):
-            self.setStyleSheet("background-color: rgba(192, 57, 43, 0.18); border-radius: 6px;")
-        else:
-            self.setStyleSheet("background-color: rgba(39, 174, 96, 0.18); border-radius: 6px;")
+        self._apply_style()
         self._on_change()
 
     def is_revealed(self) -> bool:
         return not self.reveal_button.isVisible()
+
+    def apply_shortcut_rating(self, rating: str) -> bool:
+        if not self.is_revealed() or rating not in self.buttons:
+            return False
+        self._set_rating(rating)
+        return True
+
+    def mousePressEvent(self, event: Any) -> None:
+        self._on_activate(self)
+        super().mousePressEvent(event)
+
+    def _apply_style(self) -> None:
+        background = "transparent"
+        if self._rating in ("again", "hard"):
+            background = "rgba(192, 57, 43, 0.18)"
+        elif self._rating in ("good", "easy"):
+            background = "rgba(39, 174, 96, 0.18)"
+        border = "2px solid #2d8cff" if self._active else "2px solid transparent"
+        self.setStyleSheet(f"background-color: {background}; border-radius: 6px; border: {border};")
 
 
 class SessionDialog(QDialog):
@@ -172,6 +226,7 @@ class SessionDialog(QDialog):
         self.runner = SessionRunner(mw.col, self.config, OpenAICompatibleClient.from_config(self.config))
         self.current_round: RoundData | None = None
         self.row_widgets: list[WordRowWidget] = []
+        self.active_row_index: int | None = None
 
         self.setWindowTitle("AllAI Session")
         self.resize(880, 520)
@@ -294,10 +349,11 @@ class SessionDialog(QDialog):
         self.row_widgets.clear()
 
         for row in round_data.rows:
-            widget = WordRowWidget(row, self._update_next_state)
+            widget = WordRowWidget(row, self._update_next_state, self._set_active_row)
             self.row_widgets.append(widget)
             self.rows_layout.addWidget(widget)
         self.rows_layout.addStretch(1)
+        self._set_active_row_index(0 if self.row_widgets else None)
 
     def _update_next_state(self) -> None:
         if not self.row_widgets:
@@ -305,6 +361,34 @@ class SessionDialog(QDialog):
             return
         ready = all(widget.is_revealed() and widget.rating for widget in self.row_widgets)
         self.next_button.setEnabled(ready)
+
+    def _set_active_row(self, widget: WordRowWidget) -> None:
+        try:
+            index = self.row_widgets.index(widget)
+        except ValueError:
+            return
+        self._set_active_row_index(index)
+
+    def _set_active_row_index(self, index: int | None) -> None:
+        self.active_row_index = index
+        for row_index, widget in enumerate(self.row_widgets):
+            widget.set_active(index is not None and row_index == index)
+
+    def _advance_active_row(self) -> None:
+        self._set_active_row_index(choose_next_active_row_index(self.row_widgets, self.active_row_index))
+
+    def keyPressEvent(self, event: Any) -> None:
+        rating = rating_for_key(event.key())
+        if rating is None:
+            super().keyPressEvent(event)
+            return
+        if self.active_row_index is None:
+            event.accept()
+            return
+        widget = self.row_widgets[self.active_row_index]
+        if widget.apply_shortcut_rating(rating):
+            self._advance_active_row()
+        event.accept()
 
     def _commit_round(self) -> None:
         if self.current_round is None:
