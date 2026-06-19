@@ -52,6 +52,11 @@ RATING_SHORTCUTS = {
     Qt.Key.Key_3: "good",
     Qt.Key.Key_4: "easy",
 }
+REVEAL_TOGGLE_KEYS = {Qt.Key.Key_Space}
+NAVIGATION_KEYS = {
+    Qt.Key.Key_Up: -1,
+    Qt.Key.Key_Down: 1,
+}
 
 
 def choose_session_deck_name(existing_decks: list[dict[str, Any]], base_name: str = FILTERED_DECK_NAME) -> str:
@@ -68,6 +73,18 @@ def choose_session_deck_name(existing_decks: list[dict[str, Any]], base_name: st
 
 def rating_for_key(key: int) -> str | None:
     return RATING_SHORTCUTS.get(Qt.Key(key))
+
+
+def is_reveal_toggle_key(key: int) -> bool:
+    return Qt.Key(key) in REVEAL_TOGGLE_KEYS
+
+
+def active_row_index_for_direction(row_widgets: list[Any], current_index: int | None, direction: int) -> int | None:
+    if not row_widgets:
+        return None
+    if current_index is None:
+        return 0 if direction >= 0 else len(row_widgets) - 1
+    return max(0, min(len(row_widgets) - 1, current_index + direction))
 
 
 def choose_next_active_row_index(row_widgets: list[Any], current_index: int | None) -> int | None:
@@ -146,7 +163,7 @@ class WordRowWidget(QWidget):
         layout.addWidget(self.target_label, 1)
 
         self.reveal_button = QPushButton("Reveal")
-        self.reveal_button.clicked.connect(self._reveal)
+        self.reveal_button.clicked.connect(self.toggle_reveal)
         layout.addWidget(self.reveal_button)
 
         self.native_label = QLabel(row.native)
@@ -172,12 +189,13 @@ class WordRowWidget(QWidget):
             self.setFocus(Qt.FocusReason.OtherFocusReason)
         self._apply_style()
 
-    def _reveal(self) -> None:
+    def toggle_reveal(self) -> None:
         self._on_activate(self)
-        self.reveal_button.hide()
-        self.native_label.show()
+        revealed = not self.is_revealed()
+        self.reveal_button.setText("Hide" if revealed else "Reveal")
+        self.native_label.setVisible(revealed)
         for button in self.buttons.values():
-            button.setEnabled(True)
+            button.setEnabled(revealed)
         self._on_change()
 
     def _set_rating(self, rating: str) -> None:
@@ -197,6 +215,10 @@ class WordRowWidget(QWidget):
         if not self.is_revealed() or rating not in self.buttons:
             return False
         self._set_rating(rating)
+        return True
+
+    def toggle_reveal_with_shortcut(self) -> bool:
+        self.toggle_reveal()
         return True
 
     def mousePressEvent(self, event: Any) -> None:
@@ -378,6 +400,16 @@ class SessionDialog(QDialog):
         self._set_active_row_index(choose_next_active_row_index(self.row_widgets, self.active_row_index))
 
     def keyPressEvent(self, event: Any) -> None:
+        direction = NAVIGATION_KEYS.get(Qt.Key(event.key()))
+        if direction is not None:
+            self._set_active_row_index(active_row_index_for_direction(self.row_widgets, self.active_row_index, direction))
+            event.accept()
+            return
+        if is_reveal_toggle_key(event.key()):
+            if self.active_row_index is not None:
+                self.row_widgets[self.active_row_index].toggle_reveal_with_shortcut()
+            event.accept()
+            return
         rating = rating_for_key(event.key())
         if rating is None:
             super().keyPressEvent(event)
