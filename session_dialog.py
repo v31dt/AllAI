@@ -10,9 +10,11 @@ from aqt.qt import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QKeySequence,
     QLabel,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizePolicy,
     Qt,
     QVBoxLayout,
@@ -209,7 +211,7 @@ class WordRowWidget(QWidget):
         self._on_change()
 
     def is_revealed(self) -> bool:
-        return not self.reveal_button.isVisible()
+        return self.native_label.isVisible()
 
     def apply_shortcut_rating(self, rating: str) -> bool:
         if not self.is_revealed() or rating not in self.buttons:
@@ -249,10 +251,12 @@ class SessionDialog(QDialog):
         self.current_round: RoundData | None = None
         self.row_widgets: list[WordRowWidget] = []
         self.active_row_index: int | None = None
+        self._shortcuts: list[QShortcut] = []
 
         self.setWindowTitle("AllAI Session")
         self.resize(880, 520)
         self._build_ui()
+        self._setup_shortcuts()
         try:
             self._setup_session_deck()
             self._load_next_round(show_empty_message=True)
@@ -296,6 +300,21 @@ class SessionDialog(QDialog):
         actions.addWidget(self.next_button)
         actions.addWidget(self.exit_button)
         root.addLayout(actions)
+
+    def _setup_shortcuts(self) -> None:
+        self._register_shortcut(QKeySequence("1"), partial(self._rate_active_row, "again"))
+        self._register_shortcut(QKeySequence("2"), partial(self._rate_active_row, "hard"))
+        self._register_shortcut(QKeySequence("3"), partial(self._rate_active_row, "good"))
+        self._register_shortcut(QKeySequence("4"), partial(self._rate_active_row, "easy"))
+        self._register_shortcut(QKeySequence(Qt.Key.Key_Space), self._toggle_active_row_reveal)
+        self._register_shortcut(QKeySequence(Qt.Key.Key_Up), partial(self._move_active_row, -1))
+        self._register_shortcut(QKeySequence(Qt.Key.Key_Down), partial(self._move_active_row, 1))
+
+    def _register_shortcut(self, sequence: QKeySequence, handler: Any) -> None:
+        shortcut = QShortcut(sequence, self)
+        shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(handler)
+        self._shortcuts.append(shortcut)
 
     def _load_config(self) -> dict[str, Any]:
         current = self.mw.addonManager.getConfig(__name__) or {}
@@ -399,28 +418,20 @@ class SessionDialog(QDialog):
     def _advance_active_row(self) -> None:
         self._set_active_row_index(choose_next_active_row_index(self.row_widgets, self.active_row_index))
 
-    def keyPressEvent(self, event: Any) -> None:
-        direction = NAVIGATION_KEYS.get(Qt.Key(event.key()))
-        if direction is not None:
-            self._set_active_row_index(active_row_index_for_direction(self.row_widgets, self.active_row_index, direction))
-            event.accept()
-            return
-        if is_reveal_toggle_key(event.key()):
-            if self.active_row_index is not None:
-                self.row_widgets[self.active_row_index].toggle_reveal_with_shortcut()
-            event.accept()
-            return
-        rating = rating_for_key(event.key())
-        if rating is None:
-            super().keyPressEvent(event)
-            return
+    def _rate_active_row(self, rating: str) -> None:
         if self.active_row_index is None:
-            event.accept()
             return
         widget = self.row_widgets[self.active_row_index]
         if widget.apply_shortcut_rating(rating):
             self._advance_active_row()
-        event.accept()
+
+    def _toggle_active_row_reveal(self) -> None:
+        if self.active_row_index is None:
+            return
+        self.row_widgets[self.active_row_index].toggle_reveal_with_shortcut()
+
+    def _move_active_row(self, direction: int) -> None:
+        self._set_active_row_index(active_row_index_for_direction(self.row_widgets, self.active_row_index, direction))
 
     def _commit_round(self) -> None:
         if self.current_round is None:
