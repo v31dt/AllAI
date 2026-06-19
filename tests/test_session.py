@@ -10,6 +10,7 @@ from session import (
     SessionRunner,
     build_card_payload,
     build_deck_filter,
+    build_generation_prompt,
     build_search_query,
     build_state_query,
     highlight_sentence,
@@ -158,6 +159,12 @@ class SessionTests(unittest.TestCase):
         )
         self.assertEqual(build_state_query(True), "(is:due OR is:new)")
         self.assertEqual(build_deck_filter(["Dutch", "Chinese"]), 'deck:"Dutch" OR deck:"Chinese"')
+
+    def test_build_generation_prompt_forbids_switching_to_english(self) -> None:
+        prompt = build_generation_prompt(["rok", "plein", "weet"])
+        self.assertIn("The entire sentence must be in the same target language", prompt)
+        self.assertIn("Never switch into English or another language", prompt)
+        self.assertIn("Only output an English sentence if every provided word is already English", prompt)
 
     def test_match_words_to_payloads_uses_exact_casefold_and_punctuation_matching(self) -> None:
         payloads = [

@@ -32,9 +32,13 @@ Generate ONE natural sentence using ALL of these words: {words}.
 
 Rules:
 - Maximum 15 words total.
+- The entire sentence must be in the same target language as the provided words.
 - Inflect, conjugate, or modify words as needed for natural grammar.
 - Sound like something a native speaker would actually say in everyday life.
-- Use common vocabulary for the connecting words.
+- Use common target-language vocabulary for the connecting words.
+- Never switch into English or another language for filler words, grammar, or phrasing.
+- Never translate the words into English inside the sentence.
+- Only output an English sentence if every provided word is already English.
 - Do not translate or explain.
 
 Return ONLY JSON:
@@ -45,7 +49,8 @@ Rules for words_used:
 - surface must be the actual form that appears in the sentence.
 
 If you cannot fit all words naturally, use the largest natural subset and list
-only those in words_used.
+only those in words_used. If you are unsure about the language, prefer a smaller
+subset rather than switching languages.
 """.strip()
 
 _PUNCTUATION_RE = re.compile(r"^[^\w]+|[^\w]+$")
