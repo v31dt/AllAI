@@ -55,6 +55,7 @@ subset rather than switching languages.
 
 _PUNCTUATION_RE = re.compile(r"^[^\w]+|[^\w]+$")
 _TOKEN_SPLIT_RE = re.compile(r"(\s+)")
+_EXAMPLE_TRANSLATION_RE = re.compile(r'^(?P<source>.+?)\s+[–-]\s+"(?P<translation>.+)"\s*$')
 
 
 class SentenceGenerationError(Exception):
@@ -260,6 +261,39 @@ def build_card_payload(card: Any) -> CardPayload:
     )
 
 
+def find_payload_issue(payload: CardPayload) -> str | None:
+    target = payload.target.strip()
+    native = payload.native.strip()
+    if not target:
+        return "missing a Target field"
+
+    if normalize_surface_form(target) != normalize_surface_form(native):
+        return None
+
+    example = payload.example.strip()
+    if not example:
+        return f'Target and Native are both "{target}"'
+
+    match = _EXAMPLE_TRANSLATION_RE.match(example)
+    if match is None:
+        return f'Target and Native are both "{target}"'
+
+    target_token = normalize_surface_form(target)
+    source = match.group("source")
+    translation = match.group("translation")
+    if _contains_normalized_token(translation, target_token) and not _contains_normalized_token(source, target_token):
+        return (
+            f'Target and Native are both "{target}", and the example sentence uses a different source-language word'
+        )
+    return f'Target and Native are both "{target}"'
+
+
+def _contains_normalized_token(text: str, token: str) -> bool:
+    if not token:
+        return False
+    return token in {normalize_surface_form(part) for part in text.split()}
+
+
 def match_words_to_payloads(
     payloads: Sequence[CardPayload], words_used: Sequence[WordUsage]
 ) -> tuple[list[RoundRow], list[CardPayload]]:
@@ -347,8 +381,11 @@ class SessionRunner:
             return None
 
         payloads = [build_card_payload(card) for card in batch]
-        if not payloads or not all(payload.target for payload in payloads):
-            self._messages.append("Stopped because the next queued card is missing a Target field.")
+        if not payloads:
+            return None
+        issue = find_payload_issue(payloads[0])
+        if issue is not None:
+            self._messages.append(f"Stopped because the next queued card looks malformed: {issue}.")
             return None
 
         attempt = self._prepare_attempt(payloads)

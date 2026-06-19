@@ -13,6 +13,7 @@ from session import (
     build_generation_prompt,
     build_search_query,
     build_state_query,
+    find_payload_issue,
     highlight_sentence,
     match_words_to_payloads,
     parse_generation_payload,
@@ -211,6 +212,31 @@ class SessionTests(unittest.TestCase):
         self.assertEqual([row.card_id for row in rows], [1, 2])
         self.assertEqual([row.surface_form for row in rows], ["sprak", "dokter"])
         self.assertEqual(unmatched, [])
+
+    def test_find_payload_issue_flags_identical_target_native_with_mismatched_example_language(self) -> None:
+        payload = build_card_payload(
+            FakeCard(
+                1,
+                "airplane",
+                "airplane",
+                'Het vliegtuig vliegt hoog. – "The airplane flies high."',
+            )
+        )
+        issue = find_payload_issue(payload)
+        self.assertIsNotNone(issue)
+        assert issue is not None
+        self.assertIn('Target and Native are both "airplane"', issue)
+
+    def test_prepare_next_round_stops_on_malformed_lead_card(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection(
+            [FakeCard(1, "airplane", "airplane", 'Het vliegtuig vliegt hoog. – "The airplane flies high."')],
+            log,
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, FakeLLM([]))
+        round_data = runner.prepare_next_round()
+        self.assertIsNone(round_data)
+        self.assertIn("looks malformed", runner.drain_messages()[0])
 
     def test_highlight_sentence_handles_whitespace_and_cjk_text(self) -> None:
         self.assertEqual(
