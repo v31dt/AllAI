@@ -176,7 +176,6 @@ class WordRowWidget(QWidget):
         self.buttons: dict[str, QPushButton] = {}
         for rating in ("again", "hard", "good", "easy"):
             button = QPushButton(rating.capitalize())
-            button.setEnabled(False)
             button.clicked.connect(partial(self._set_rating, rating))
             self.buttons[rating] = button
             layout.addWidget(button)
@@ -196,8 +195,6 @@ class WordRowWidget(QWidget):
         revealed = not self.is_revealed()
         self.reveal_button.setText("Hide" if revealed else "Reveal")
         self.native_label.setVisible(revealed)
-        for button in self.buttons.values():
-            button.setEnabled(revealed)
         self._on_change()
 
     def _set_rating(self, rating: str) -> None:
@@ -214,7 +211,7 @@ class WordRowWidget(QWidget):
         return self.native_label.isVisible()
 
     def apply_shortcut_rating(self, rating: str) -> bool:
-        if not self.is_revealed() or rating not in self.buttons:
+        if rating not in self.buttons:
             return False
         self._set_rating(rating)
         return True
@@ -379,7 +376,7 @@ class SessionDialog(QDialog):
             f"Round {round_data.round_index} · {round_data.reviewed_words_before_round} words reviewed"
         )
         self.sentence_label.setText(round_data.sentence_html)
-        self.status_label.setText("Reveal each word before rating it.")
+        self.status_label.setText("Rate each word. Reveal is optional.")
         self.next_button.setEnabled(False)
 
         while self.rows_layout.count():
@@ -400,7 +397,7 @@ class SessionDialog(QDialog):
         if not self.row_widgets:
             self.next_button.setEnabled(False)
             return
-        ready = all(widget.is_revealed() and widget.rating for widget in self.row_widgets)
+        ready = all(widget.rating for widget in self.row_widgets)
         self.next_button.setEnabled(ready)
 
     def _set_active_row(self, widget: WordRowWidget) -> None:
