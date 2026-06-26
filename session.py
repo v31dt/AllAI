@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 NOTE_TYPE_NAME = "LangCard"
+SESSION_CARD_TEMPLATE_NAME = "Recognition"
 TARGET_FIELD = "Target"
 NATIVE_FIELD = "Native"
 EXAMPLE_FIELD = "Example"
@@ -159,7 +160,7 @@ def build_search_query(decks: Sequence[str], include_new_cards: bool) -> str:
         raise ValueError("At least one deck must be configured.")
     deck_filter = build_deck_filter(usable_decks)
     state = build_state_query(include_new_cards)
-    return f"{state} ({deck_filter}) note:{NOTE_TYPE_NAME}"
+    return f'{state} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{SESSION_CARD_TEMPLATE_NAME}"'
 
 
 def build_deck_filter(decks: Sequence[str]) -> str:
@@ -449,14 +450,21 @@ class SessionRunner:
         state_query = build_state_query(include_new_cards)
         deck_filter = build_deck_filter(decks)
         any_cards_query = f"{state_query} ({deck_filter})"
-        langcard_query = f"{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME}"
+        any_langcard_query = f"{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME}"
+        session_langcard_query = build_search_query(decks, include_new_cards)
 
         any_matching = len(self.col.find_cards(any_cards_query))
-        langcard_matching = len(self.col.find_cards(langcard_query))
-        if any_matching > 0 and langcard_matching == 0:
+        any_langcard_matching = len(self.col.find_cards(any_langcard_query))
+        session_langcard_matching = len(self.col.find_cards(session_langcard_query))
+        if any_matching > 0 and any_langcard_matching == 0:
             return (
                 "The configured deck has due/new cards, but none of them use the LangCard note type. "
                 "Run Tools -> AllAI -> Migrate notes first, or import cards as LangCard."
+            )
+        if any_langcard_matching > 0 and session_langcard_matching == 0:
+            return (
+                "The configured deck has due/new LangCard cards, but none are Recognition cards for AllAI. "
+                "Review the reverse Production cards in normal Anki, or wait until Recognition cards are due."
             )
         return "Nothing due."
 

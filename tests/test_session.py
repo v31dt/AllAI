@@ -152,11 +152,11 @@ class SessionTests(unittest.TestCase):
     def test_build_search_query_with_and_without_new_cards(self) -> None:
         self.assertEqual(
             build_search_query(["Dutch"], True),
-            '(is:due OR is:new) (deck:"Dutch") note:LangCard',
+            '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Recognition"',
         )
         self.assertEqual(
             build_search_query(["Dutch", "Chinese"], False),
-            '(is:due -is:new) (deck:"Dutch" OR deck:"Chinese") note:LangCard',
+            '(is:due -is:new) (deck:"Dutch" OR deck:"Chinese") note:LangCard card:"Recognition"',
         )
         self.assertEqual(build_state_query(True), "(is:due OR is:new)")
         self.assertEqual(build_deck_filter(["Dutch", "Chinese"]), 'deck:"Dutch" OR deck:"Chinese"')
@@ -396,11 +396,24 @@ class SessionTests(unittest.TestCase):
         responses = {
             '(is:due OR is:new) (deck:"dutch cursus")': [1, 2, 3],
             '(is:due OR is:new) (deck:"dutch cursus") note:LangCard': [],
+            '(is:due OR is:new) (deck:"dutch cursus") note:LangCard card:"Recognition"': [],
         }
         col = ExplainCollection([], log, responses)
         runner = SessionRunner(col, {"decks": ["dutch cursus"]}, FakeLLM([]))
         message = runner.explain_why_no_cards()
         self.assertIn("none of them use the LangCard note type", message)
+
+    def test_explain_why_no_cards_mentions_reverse_only_langcards(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        responses = {
+            '(is:due OR is:new) (deck:"dutch cursus")': [1, 2, 3],
+            '(is:due OR is:new) (deck:"dutch cursus") note:LangCard': [1, 2, 3],
+            '(is:due OR is:new) (deck:"dutch cursus") note:LangCard card:"Recognition"': [],
+        }
+        col = ExplainCollection([], log, responses)
+        runner = SessionRunner(col, {"decks": ["dutch cursus"]}, FakeLLM([]))
+        message = runner.explain_why_no_cards()
+        self.assertIn("none are Recognition cards for AllAI", message)
 
 
 if __name__ == "__main__":
