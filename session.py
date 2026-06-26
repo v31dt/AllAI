@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import html
-import json
-import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 NOTE_TYPE_NAME = "LangCard"
@@ -16,7 +12,6 @@ NATIVE_FIELD = "Native"
 EXAMPLE_FIELD = "Example"
 
 EASE = {"again": 1, "hard": 2, "good": 3, "easy": 4}
-REPETITION_LOG_PATH = Path(os.environ.get("ALLAI_REPETITION_LOG", "/tmp/allai-session-repetition.log"))
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
@@ -308,66 +303,6 @@ def _contains_normalized_token(text: str, token: str) -> bool:
     return token in {normalize_surface_form(part) for part in text.split()}
 
 
-def card_payload_debug_data(payload: CardPayload) -> dict[str, Any]:
-    return {
-        "card_id": payload.card_id,
-        "note_id": payload.note_id,
-        "card_ord": payload.card_ord,
-        "target": payload.target,
-        "normalized_target": normalize_surface_form(payload.target),
-        "native": payload.native,
-        "due": payload.due,
-        "queue": payload.queue,
-        "card_type": payload.card_type,
-    }
-
-
-def find_repetition_events(
-    payloads: Sequence[CardPayload], seen_targets: dict[str, list[dict[str, Any]]]
-) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    current_batch: dict[str, list[CardPayload]] = {}
-    for payload in payloads:
-        current_batch.setdefault(normalize_surface_form(payload.target), []).append(payload)
-
-    for normalized_target, grouped_payloads in current_batch.items():
-        if len(grouped_payloads) > 1:
-            note_ids = {payload.note_id for payload in grouped_payloads}
-            card_ords = {payload.card_ord for payload in grouped_payloads}
-            reason = "same_note_multiple_cards" if len(note_ids) == 1 and len(card_ords) > 1 else "duplicate_target_in_batch"
-            events.append(
-                {
-                    "reason": reason,
-                    "normalized_target": normalized_target,
-                    "current_cards": [card_payload_debug_data(payload) for payload in grouped_payloads],
-                }
-            )
-
-        previous = seen_targets.get(normalized_target, [])
-        if previous:
-            events.append(
-                {
-                    "reason": "target_seen_earlier_in_session",
-                    "normalized_target": normalized_target,
-                    "previous_cards": previous,
-                    "current_cards": [card_payload_debug_data(payload) for payload in grouped_payloads],
-                }
-            )
-    return events
-
-
-def append_repetition_log(event: dict[str, Any]) -> None:
-    payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        **event,
-    }
-    try:
-        with REPETITION_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    except OSError:
-        pass
-
-
 def match_words_to_payloads(
     payloads: Sequence[CardPayload], words_used: Sequence[WordUsage]
 ) -> tuple[list[RoundRow], list[CardPayload]]:
@@ -444,11 +379,9 @@ class SessionRunner:
         self.col = col
         self.config = deep_merge_config(DEFAULT_CONFIG, config)
         self.llm_client = llm_client
-        self.session_log_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         self.reviewed_words = 0
         self.completed_rounds = 0
         self.skip_counts: dict[int, int] = {}
-        self.seen_targets: dict[str, list[dict[str, Any]]] = {}
         self._messages: list[str] = []
 
     def prepare_next_round(self) -> RoundData | None:
@@ -459,7 +392,6 @@ class SessionRunner:
         payloads = [build_card_payload(card) for card in batch]
         if not payloads:
             return None
-        self._log_selected_batch(payloads)
         issue = find_payload_issue(payloads[0])
         if issue is not None:
             self._messages.append(f"Stopped because the next queued card looks malformed: {issue}.")
@@ -514,16 +446,6 @@ class SessionRunner:
 
         self.reviewed_words += len(round_data.rows)
         self.completed_rounds += 1
-        self._remember_reviewed_rows(round_data.rows)
-        append_repetition_log(
-            {
-                "event": "committed_round",
-                "session_id": self.session_log_id,
-                "round_index": round_data.round_index,
-                "ratings": ratings,
-                "rows": [self._row_debug_data(row) for row in round_data.rows],
-            }
-        )
 
     def drain_messages(self) -> list[str]:
         messages = list(self._messages)
@@ -565,44 +487,6 @@ class SessionRunner:
                 card.start_timer()
             cards.append(card)
         return cards
-
-    def _log_selected_batch(self, payloads: Sequence[CardPayload]) -> None:
-        repetition_events = find_repetition_events(payloads, self.seen_targets)
-        append_repetition_log(
-            {
-                "event": "selected_batch",
-                "session_id": self.session_log_id,
-                "round_index": self.completed_rounds + 1,
-                "configured_decks": self.config.get("decks", []),
-                "cards": [card_payload_debug_data(payload) for payload in payloads],
-                "repetition_events": repetition_events,
-            }
-        )
-        for event in repetition_events:
-            reason = event.get("reason", "unknown")
-            target = event.get("normalized_target", "")
-            self._messages.append(f"Repetition diagnostic: {target} ({reason}). See {REPETITION_LOG_PATH}.")
-
-    def _remember_reviewed_rows(self, rows: Sequence[RoundRow]) -> None:
-        for row in rows:
-            normalized_target = normalize_surface_form(row.target)
-            self.seen_targets.setdefault(normalized_target, []).append(self._row_debug_data(row))
-
-    @staticmethod
-    def _row_debug_data(row: RoundRow) -> dict[str, Any]:
-        card = row.card
-        return {
-            "card_id": row.card_id,
-            "note_id": int(getattr(card, "nid", 0)),
-            "card_ord": int(getattr(card, "ord", -1)),
-            "target": row.target,
-            "normalized_target": normalize_surface_form(row.target),
-            "native": row.native,
-            "surface_form": row.surface_form,
-            "due": int(getattr(card, "due", 0)),
-            "queue": int(getattr(card, "queue")) if hasattr(card, "queue") else None,
-            "card_type": int(getattr(card, "type")) if hasattr(card, "type") else None,
-        }
 
     def _generate_sentence_with_retry(self, words: Sequence[str]) -> dict[str, Any]:
         max_retries = int(self.config["session"]["max_llm_retries"])

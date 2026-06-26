@@ -14,7 +14,6 @@ from session import (
     build_search_query,
     build_state_query,
     find_payload_issue,
-    find_repetition_events,
     highlight_sentence,
     match_words_to_payloads,
     parse_generation_payload,
@@ -243,35 +242,6 @@ class SessionTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         assert issue is not None
         self.assertIn('Target and Native are both "airplane"', issue)
-
-    def test_find_repetition_events_detects_same_note_multiple_cards(self) -> None:
-        payloads = [
-            build_card_payload(FakeCard(1, "klopt", "correct", note_id=100, ord=0)),
-            build_card_payload(FakeCard(2, "klopt", "correct", note_id=100, ord=1)),
-        ]
-        events = find_repetition_events(payloads, {})
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["reason"], "same_note_multiple_cards")
-        self.assertEqual(events[0]["normalized_target"], "klopt")
-
-    def test_find_repetition_events_detects_target_seen_earlier_in_session(self) -> None:
-        payloads = [build_card_payload(FakeCard(2, "klopt", "correct", note_id=101, ord=0))]
-        events = find_repetition_events(
-            payloads,
-            {
-                "klopt": [
-                    {
-                        "card_id": 1,
-                        "note_id": 100,
-                        "card_ord": 0,
-                        "target": "klopt",
-                    }
-                ]
-            },
-        )
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["reason"], "target_seen_earlier_in_session")
-        self.assertEqual(events[0]["previous_cards"][0]["card_id"], 1)
 
     def test_prepare_next_round_stops_on_malformed_lead_card(self) -> None:
         log: list[tuple[str, int | str]] = []
