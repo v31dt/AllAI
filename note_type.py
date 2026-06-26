@@ -17,15 +17,35 @@ NOTE_TYPE_CSS = """
 }
 """.strip()
 
-TEMPLATE_NAME = "Recognition"
-QUESTION_FORMAT = "{{" + TARGET_FIELD + "}}"
-ANSWER_FORMAT = (
+RECOGNITION_TEMPLATE_NAME = "Recognition"
+RECOGNITION_QUESTION_FORMAT = "{{" + TARGET_FIELD + "}}"
+RECOGNITION_ANSWER_FORMAT = (
     "{{FrontSide}}<hr id=answer>{{"
     + NATIVE_FIELD
     + "}}<br>{{"
     + EXAMPLE_FIELD
     + "}}"
 )
+PRODUCTION_TEMPLATE_NAME = "Production"
+PRODUCTION_QUESTION_FORMAT = "{{" + NATIVE_FIELD + "}}"
+PRODUCTION_ANSWER_FORMAT = (
+    "{{FrontSide}}<hr id=answer>{{"
+    + TARGET_FIELD
+    + "}}<br>{{"
+    + EXAMPLE_FIELD
+    + "}}"
+)
+
+TEMPLATES = {
+    RECOGNITION_TEMPLATE_NAME: {
+        "qfmt": RECOGNITION_QUESTION_FORMAT,
+        "afmt": RECOGNITION_ANSWER_FORMAT,
+    },
+    PRODUCTION_TEMPLATE_NAME: {
+        "qfmt": PRODUCTION_QUESTION_FORMAT,
+        "afmt": PRODUCTION_ANSWER_FORMAT,
+    },
+}
 
 
 def ensure_langcard_notetype(col: Any) -> dict[str, Any]:
@@ -50,10 +70,11 @@ def _create_langcard_notetype(col: Any) -> dict[str, Any]:
     notetype["tmpls"] = []
     for field_name in (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD):
         col.models.add_field(notetype, col.models.new_field(field_name))
-    template = col.models.new_template(TEMPLATE_NAME)
-    template["qfmt"] = QUESTION_FORMAT
-    template["afmt"] = ANSWER_FORMAT
-    col.models.add_template(notetype, template)
+    for template_name, formats in TEMPLATES.items():
+        template = col.models.new_template(template_name)
+        template["qfmt"] = formats["qfmt"]
+        template["afmt"] = formats["afmt"]
+        col.models.add_template(notetype, template)
     notetype["css"] = NOTE_TYPE_CSS
     notetype["sortf"] = 0
     col.models.add(notetype)
@@ -73,25 +94,24 @@ def _ensure_fields(col: Any, notetype: dict[str, Any]) -> bool:
 
 def _ensure_template(col: Any, notetype: dict[str, Any]) -> bool:
     templates = notetype["tmpls"]
-    for template in templates:
-        if template["name"] == TEMPLATE_NAME:
-            updated = False
-            if template.get("qfmt") != QUESTION_FORMAT:
-                template["qfmt"] = QUESTION_FORMAT
-                updated = True
-            if template.get("afmt") != ANSWER_FORMAT:
-                template["afmt"] = ANSWER_FORMAT
-                updated = True
-            return updated
+    updated = False
 
-    if len(templates) == 1:
-        templates[0]["name"] = TEMPLATE_NAME
-        templates[0]["qfmt"] = QUESTION_FORMAT
-        templates[0]["afmt"] = ANSWER_FORMAT
-        return True
+    if len(templates) == 1 and templates[0]["name"] not in TEMPLATES:
+        templates[0]["name"] = RECOGNITION_TEMPLATE_NAME
+        updated = True
 
-    template = col.models.new_template(TEMPLATE_NAME)
-    template["qfmt"] = QUESTION_FORMAT
-    template["afmt"] = ANSWER_FORMAT
-    col.models.add_template(notetype, template)
-    return True
+    templates_by_name = {template["name"]: template for template in templates}
+    for template_name, formats in TEMPLATES.items():
+        template = templates_by_name.get(template_name)
+        if template is None:
+            template = col.models.new_template(template_name)
+            col.models.add_template(notetype, template)
+            updated = True
+        if template.get("qfmt") != formats["qfmt"]:
+            template["qfmt"] = formats["qfmt"]
+            updated = True
+        if template.get("afmt") != formats["afmt"]:
+            template["afmt"] = formats["afmt"]
+            updated = True
+
+    return updated
