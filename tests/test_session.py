@@ -264,6 +264,26 @@ class SessionTests(unittest.TestCase):
             "我喜欢<b>学习</b><b>中文</b>",
         )
 
+    def test_highlight_sentence_handles_dutch_articles_phrases_and_punctuation(self) -> None:
+        self.assertEqual(
+            highlight_sentence("Ik kocht gisteren een jurk.", ["de jurk"]),
+            "Ik kocht gisteren een <b>jurk.</b>",
+        )
+        self.assertEqual(
+            highlight_sentence("De jurk hangt naast Sint Maarten.", ["de jurk", "sint maarten"]),
+            "<b>De jurk</b> hangt naast <b>Sint Maarten.</b>",
+        )
+        self.assertEqual(
+            highlight_sentence("Van harte! Dat is geen hartelijk gebaar.", ["van harte!"]),
+            "<b>Van harte!</b> Dat is geen hartelijk gebaar.",
+        )
+
+    def test_highlight_sentence_does_not_highlight_inside_larger_words(self) -> None:
+        self.assertEqual(
+            highlight_sentence("Het jurkje hangt naast de jurk.", ["jurk"]),
+            "Het jurkje hangt naast de <b>jurk.</b>",
+        )
+
     def test_prepare_next_round_retries_once_after_malformed_output(self) -> None:
         log: list[tuple[str, int | str]] = []
         col = FakeCollection([FakeCard(1, "dokter", "doctor")], log)

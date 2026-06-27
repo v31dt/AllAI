@@ -55,8 +55,8 @@ subset rather than switching languages.
 """.strip()
 
 _PUNCTUATION_RE = re.compile(r"^[^\w]+|[^\w]+$")
-_TOKEN_SPLIT_RE = re.compile(r"(\s+)")
 _EXAMPLE_TRANSLATION_RE = re.compile(r'^(?P<source>.+?)\s+[–-]\s+"(?P<translation>.+)"\s*$')
+_DUTCH_ARTICLES = {"de", "het", "een"}
 
 
 class SentenceGenerationError(Exception):
@@ -209,22 +209,69 @@ def highlight_sentence(sentence: str, targets: Sequence[str]) -> str:
 
     if contains_cjk(cleaned_targets[0]):
         return _highlight_cjk(sentence, cleaned_targets)
-    return _highlight_whitespace_tokens(sentence, cleaned_targets)
+    return _highlight_latin_text(sentence, cleaned_targets)
 
 
-def _highlight_whitespace_tokens(sentence: str, targets: Sequence[str]) -> str:
-    normalized_targets = {normalize_surface_form(target) for target in targets}
-    parts = _TOKEN_SPLIT_RE.split(sentence)
-    rendered: list[str] = []
-    for part in parts:
-        escaped = html.escape(part)
-        if not part or part.isspace():
-            rendered.append(escaped)
+def _highlight_latin_text(sentence: str, targets: Sequence[str]) -> str:
+    spans = _find_latin_highlight_spans(sentence, targets)
+    if not spans:
+        return html.escape(sentence)
+    return _render_highlighted_spans(sentence, spans)
+
+
+def _find_latin_highlight_spans(sentence: str, targets: Sequence[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    occupied: set[int] = set()
+    for term in _highlight_terms(targets):
+        pattern = _latin_term_pattern(term)
+        if pattern is None:
             continue
-        if normalize_surface_form(part) in normalized_targets:
-            rendered.append(f"<b>{escaped}</b>")
-        else:
-            rendered.append(escaped)
+        for match in pattern.finditer(sentence):
+            start, end = _expand_span_to_adjacent_punctuation(sentence, match.start(), match.end())
+            if any(position in occupied for position in range(start, end)):
+                continue
+            spans.append((start, end))
+            occupied.update(range(start, end))
+    return sorted(spans)
+
+
+def _highlight_terms(targets: Sequence[str]) -> list[str]:
+    terms: set[str] = set()
+    for target in targets:
+        stripped = _PUNCTUATION_RE.sub("", target).strip()
+        if not stripped:
+            continue
+        terms.add(stripped)
+        parts = stripped.split()
+        if len(parts) > 1 and parts[0].casefold() in _DUTCH_ARTICLES:
+            terms.add(" ".join(parts[1:]))
+    return sorted(terms, key=len, reverse=True)
+
+
+def _latin_term_pattern(term: str) -> re.Pattern[str] | None:
+    parts = term.split()
+    if not parts:
+        return None
+    escaped_parts = [re.escape(part) for part in parts]
+    return re.compile(r"(?<!\w)" + r"\s+".join(escaped_parts) + r"(?!\w)", re.IGNORECASE)
+
+
+def _expand_span_to_adjacent_punctuation(sentence: str, start: int, end: int) -> tuple[int, int]:
+    while start > 0 and not sentence[start - 1].isalnum() and not sentence[start - 1].isspace():
+        start -= 1
+    while end < len(sentence) and not sentence[end].isalnum() and not sentence[end].isspace():
+        end += 1
+    return start, end
+
+
+def _render_highlighted_spans(sentence: str, spans: Sequence[tuple[int, int]]) -> str:
+    rendered: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        rendered.append(html.escape(sentence[cursor:start]))
+        rendered.append(f"<b>{html.escape(sentence[start:end])}</b>")
+        cursor = end
+    rendered.append(html.escape(sentence[cursor:]))
     return "".join(rendered)
 
 
@@ -242,16 +289,7 @@ def _highlight_cjk(sentence: str, targets: Sequence[str]) -> str:
                 spans.append((index, end))
                 occupied.update(range(index, end))
             start = index + 1
-    starts = {start for start, _ in spans}
-    ends = {end for _, end in spans}
-    rendered: list[str] = []
-    for index, char in enumerate(sentence):
-        if index in starts:
-            rendered.append("<b>")
-        rendered.append(html.escape(char))
-        if index + 1 in ends:
-            rendered.append("</b>")
-    return "".join(rendered)
+    return _render_highlighted_spans(sentence, sorted(spans))
 
 
 def build_card_payload(card: Any) -> CardPayload:
@@ -401,7 +439,7 @@ class SessionRunner:
         if attempt is None:
             return None
 
-        matched_targets = [row.surface_form or row.target for row in attempt.rows]
+        matched_targets = _highlight_targets_for_rows(attempt.rows)
         return RoundData(
             round_index=self.completed_rounds + 1,
             reviewed_words_before_round=self.reviewed_words,
@@ -541,6 +579,15 @@ class SessionRunner:
                 "Try starting the session again or review that card normally first."
             )
         return None
+
+
+def _highlight_targets_for_rows(rows: Sequence[RoundRow]) -> list[str]:
+    targets: list[str] = []
+    for row in rows:
+        targets.append(row.target)
+        if row.surface_form and normalize_surface_form(row.surface_form) != normalize_surface_form(row.target):
+            targets.append(row.surface_form)
+    return targets
 
 
 def _schedulable_prefix_rows(
