@@ -30,7 +30,7 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
         RoundCommitError,
         RoundData,
         SessionRunner,
-        build_search_query,
+        build_filtered_deck_searches,
         deep_merge_config,
     )
 except ImportError:  # pragma: no cover
@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover
         RoundCommitError,
         RoundData,
         SessionRunner,
-        build_search_query,
+        build_filtered_deck_searches,
         deep_merge_config,
     )
 
@@ -328,14 +328,17 @@ class SessionDialog(QDialog):
         config.reschedule = True
         del config.delays[:]
         del config.search_terms[:]
-        term = config.search_terms.add()
-        term.search = build_search_query(
+        search_terms = build_filtered_deck_searches(
             self.config.get("decks", []),
             bool(self.config["session"]["include_new_cards"]),
             direction,
         )
-        term.limit = max(1000, int(self.config["session"]["words_per_sentence"]) * 250)
-        term.order = FILTERED_ORDER_DUE
+        term_limit = max(1000, int(self.config["session"]["words_per_sentence"]) * 250)
+        for search in search_terms:
+            term = config.search_terms.add()
+            term.search = search
+            term.limit = term_limit
+            term.order = FILTERED_ORDER_DUE
         out = self.mw.col.sched.add_or_update_filtered_deck(deck)
         self.session_deck_id = int(out.id)
         self.mw.col.decks.select(self.session_deck_id)

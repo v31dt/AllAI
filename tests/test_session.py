@@ -11,6 +11,7 @@ from session import (
     SessionRunner,
     build_card_payload,
     build_deck_filter,
+    build_filtered_deck_searches,
     build_generation_prompt,
     build_search_query,
     build_state_query,
@@ -183,6 +184,19 @@ class SessionTests(unittest.TestCase):
         )
         self.assertEqual(build_state_query(True), "(is:due OR is:new)")
         self.assertEqual(build_deck_filter(["Dutch", "Chinese"]), 'deck:"Dutch" OR deck:"Chinese"')
+
+    def test_build_filtered_deck_searches_puts_due_before_new(self) -> None:
+        self.assertEqual(
+            build_filtered_deck_searches(["Dutch"], True),
+            [
+                '(is:due -is:new) (deck:"Dutch") note:LangCard card:"Recognition"',
+                'is:new (deck:"Dutch") note:LangCard card:"Recognition"',
+            ],
+        )
+        self.assertEqual(
+            build_filtered_deck_searches(["Dutch"], False, PRODUCTION_DIRECTION),
+            ['(is:due -is:new) (deck:"Dutch") note:LangCard card:"Production"'],
+        )
 
     def test_build_generation_prompt_forbids_switching_to_english(self) -> None:
         prompt = build_generation_prompt(["rok", "plein", "weet"])

@@ -246,13 +246,32 @@ def build_search_query(
     include_new_cards: bool,
     direction: str = RECOGNITION_DIRECTION,
 ) -> str:
+    state = build_state_query(include_new_cards)
+    return build_search_query_for_state(decks, state, direction)
+
+
+def build_search_query_for_state(
+    decks: Sequence[str],
+    state_query: str,
+    direction: str = RECOGNITION_DIRECTION,
+) -> str:
     usable_decks = [deck.strip() for deck in decks if deck.strip()]
     if not usable_decks:
         raise ValueError("At least one deck must be configured.")
     deck_filter = build_deck_filter(usable_decks)
-    state = build_state_query(include_new_cards)
     template = CARD_TEMPLATE_BY_DIRECTION.get(direction, RECOGNITION_CARD_TEMPLATE_NAME)
-    return f'{state} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{template}"'
+    return f'{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{template}"'
+
+
+def build_filtered_deck_searches(
+    decks: Sequence[str],
+    include_new_cards: bool,
+    direction: str = RECOGNITION_DIRECTION,
+) -> list[str]:
+    searches = [build_search_query_for_state(decks, build_state_query(False), direction)]
+    if include_new_cards:
+        searches.append(build_search_query_for_state(decks, "is:new", direction))
+    return searches
 
 
 def build_deck_filter(decks: Sequence[str]) -> str:
