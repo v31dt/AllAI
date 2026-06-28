@@ -159,7 +159,7 @@ class WordRowWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 6, 0, 6)
 
-        self.target_label = QLabel(row.target)
+        self.target_label = QLabel(row.prompt_text)
         self.target_label.setMinimumWidth(120)
         self.target_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout.addWidget(self.target_label, 1)
@@ -168,7 +168,7 @@ class WordRowWidget(QWidget):
         self.reveal_button.clicked.connect(self.toggle_reveal)
         layout.addWidget(self.reveal_button)
 
-        self.native_label = QLabel(row.native)
+        self.native_label = QLabel(row.answer_text)
         self.native_label.hide()
         self.native_label.setMinimumWidth(140)
         layout.addWidget(self.native_label)
@@ -255,7 +255,6 @@ class SessionDialog(QDialog):
         self._build_ui()
         self._setup_shortcuts()
         try:
-            self._setup_session_deck()
             self._load_next_round(show_empty_message=True)
         except Exception as exc:
             self._cleanup_session_deck()
@@ -317,11 +316,11 @@ class SessionDialog(QDialog):
         current = self.mw.addonManager.getConfig(__name__) or {}
         return deep_merge_config(DEFAULT_CONFIG, current)
 
-    def _setup_session_deck(self) -> None:
+    def _setup_session_deck(self, direction: str) -> None:
         deck_name = choose_session_deck_name(self.mw.col.decks.all())
         existing = self.mw.col.decks.by_name(deck_name)
 
-        existing_id = int(existing["id"]) if existing is not None else 0
+        existing_id = self.session_deck_id or (int(existing["id"]) if existing is not None else 0)
         deck = self.mw.col.sched.get_or_create_filtered_deck(existing_id)
         deck.name = deck_name
         deck.allow_empty = True
@@ -333,6 +332,7 @@ class SessionDialog(QDialog):
         term.search = build_search_query(
             self.config.get("decks", []),
             bool(self.config["session"]["include_new_cards"]),
+            direction,
         )
         term.limit = max(1000, int(self.config["session"]["words_per_sentence"]) * 250)
         term.order = FILTERED_ORDER_DUE
@@ -345,7 +345,14 @@ class SessionDialog(QDialog):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
-            self.current_round = self.runner.prepare_next_round()
+            if self.session_deck_id is not None:
+                self.mw.col.sched.empty_filtered_deck(self.session_deck_id)
+            direction = self.runner.choose_next_direction()
+            if direction is None:
+                self.current_round = None
+            else:
+                self._setup_session_deck(direction)
+                self.current_round = self.runner.prepare_next_round(direction)
         except LLMUnavailableError as exc:
             self._restore_cursor()
             self._cleanup_session_deck()
@@ -373,7 +380,8 @@ class SessionDialog(QDialog):
 
     def _render_round(self, round_data: RoundData) -> None:
         self.header_label.setText(
-            f"Round {round_data.round_index} · {round_data.reviewed_words_before_round} words reviewed"
+            f"Round {round_data.round_index} · {round_data.direction_label} · "
+            f"{round_data.reviewed_words_before_round} words reviewed"
         )
         self.sentence_label.setText(round_data.sentence_html)
         self.status_label.setText("Rate each word. Reveal is optional.")

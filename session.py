@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 NOTE_TYPE_NAME = "LangCard"
-SESSION_CARD_TEMPLATE_NAME = "Recognition"
+RECOGNITION_DIRECTION = "recognition"
+PRODUCTION_DIRECTION = "production"
+CARD_MODE_BOTH = "both"
+CARD_MODE_RECOGNITION = RECOGNITION_DIRECTION
+CARD_MODE_PRODUCTION = PRODUCTION_DIRECTION
+RECOGNITION_CARD_TEMPLATE_NAME = "Recognition"
+PRODUCTION_CARD_TEMPLATE_NAME = "Production"
 TARGET_FIELD = "Target"
 NATIVE_FIELD = "Native"
 EXAMPLE_FIELD = "Example"
@@ -23,12 +29,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "session": {
         "words_per_sentence": 4,
         "include_new_cards": True,
+        "card_mode": CARD_MODE_BOTH,
         "max_llm_retries": 1,
         "max_skip_attempts_per_card": 3,
     },
 }
 
-PROMPT_TEMPLATE = """
+RECOGNITION_PROMPT_TEMPLATE = """
 Generate ONE natural sentence using ALL of these words: {words}.
 
 Rules:
@@ -53,6 +60,43 @@ If you cannot fit all words naturally, use the largest natural subset and list
 only those in words_used. If you are unsure about the language, prefer a smaller
 subset rather than switching languages.
 """.strip()
+
+PRODUCTION_PROMPT_TEMPLATE = """
+Generate ONE natural English sentence using ALL of these English cues: {words}.
+
+Rules:
+- Maximum 15 words total.
+- The entire sentence must be in English.
+- Sound natural and everyday.
+- Use each cue as written when possible; minor grammar changes are allowed.
+- Do not translate the cues into another language inside the sentence.
+- Do not explain.
+
+Return ONLY JSON:
+{{"sentence": "...", "words_used": [{{"target": "original cue 1", "surface": "surface form 1"}}, ...]}}
+
+Rules for words_used:
+- target must exactly copy one of the provided cues.
+- surface must be the actual form that appears in the sentence.
+
+If you cannot fit all cues naturally, use the largest natural subset and list
+only those in words_used.
+""".strip()
+
+PROMPT_TEMPLATES = {
+    RECOGNITION_DIRECTION: RECOGNITION_PROMPT_TEMPLATE,
+    PRODUCTION_DIRECTION: PRODUCTION_PROMPT_TEMPLATE,
+}
+
+CARD_TEMPLATE_BY_DIRECTION = {
+    RECOGNITION_DIRECTION: RECOGNITION_CARD_TEMPLATE_NAME,
+    PRODUCTION_DIRECTION: PRODUCTION_CARD_TEMPLATE_NAME,
+}
+CARD_ORD_BY_DIRECTION = {
+    RECOGNITION_DIRECTION: 0,
+    PRODUCTION_DIRECTION: 1,
+}
+VALID_CARD_MODES = {CARD_MODE_BOTH, CARD_MODE_RECOGNITION, CARD_MODE_PRODUCTION}
 
 _PUNCTUATION_RE = re.compile(r"^[^\w]+|[^\w]+$")
 _EXAMPLE_TRANSLATION_RE = re.compile(r'^(?P<source>.+?)\s+[–-]\s+"(?P<translation>.+)"\s*$')
@@ -105,6 +149,9 @@ class CardPayload:
     card_ord: int
     target: str
     native: str
+    direction: str
+    prompt_text: str
+    answer_text: str
     example: str
     due: int
     queue: int | None = None
@@ -122,6 +169,9 @@ class RoundRow:
     card_id: int
     target: str
     native: str
+    direction: str
+    prompt_text: str
+    answer_text: str
     example: str
     surface_form: str
     card: Any
@@ -131,6 +181,8 @@ class RoundRow:
 class RoundData:
     round_index: int
     reviewed_words_before_round: int
+    direction: str
+    direction_label: str
     sentence: str
     sentence_html: str
     rows: list[RoundRow]
@@ -158,13 +210,49 @@ def deep_merge_config(defaults: dict[str, Any], overrides: dict[str, Any] | None
     return merged
 
 
-def build_search_query(decks: Sequence[str], include_new_cards: bool) -> str:
+def normalize_card_mode(value: Any) -> str:
+    mode = str(value or CARD_MODE_BOTH).strip().casefold()
+    return mode if mode in VALID_CARD_MODES else CARD_MODE_BOTH
+
+
+def direction_label(direction: str) -> str:
+    if direction == PRODUCTION_DIRECTION:
+        return "Production"
+    return "Recognition"
+
+
+def configured_directions(card_mode: str) -> list[str]:
+    mode = normalize_card_mode(card_mode)
+    if mode == CARD_MODE_PRODUCTION:
+        return [PRODUCTION_DIRECTION]
+    if mode == CARD_MODE_RECOGNITION:
+        return [RECOGNITION_DIRECTION]
+    return [RECOGNITION_DIRECTION, PRODUCTION_DIRECTION]
+
+
+def next_direction_order(card_mode: str, last_direction: str | None) -> list[str]:
+    directions = configured_directions(card_mode)
+    if len(directions) < 2:
+        return directions
+    if last_direction == RECOGNITION_DIRECTION:
+        return [PRODUCTION_DIRECTION, RECOGNITION_DIRECTION]
+    if last_direction == PRODUCTION_DIRECTION:
+        return [RECOGNITION_DIRECTION, PRODUCTION_DIRECTION]
+    return directions
+
+
+def build_search_query(
+    decks: Sequence[str],
+    include_new_cards: bool,
+    direction: str = RECOGNITION_DIRECTION,
+) -> str:
     usable_decks = [deck.strip() for deck in decks if deck.strip()]
     if not usable_decks:
         raise ValueError("At least one deck must be configured.")
     deck_filter = build_deck_filter(usable_decks)
     state = build_state_query(include_new_cards)
-    return f'{state} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{SESSION_CARD_TEMPLATE_NAME}"'
+    template = CARD_TEMPLATE_BY_DIRECTION.get(direction, RECOGNITION_CARD_TEMPLATE_NAME)
+    return f'{state} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{template}"'
 
 
 def build_deck_filter(decks: Sequence[str]) -> str:
@@ -178,9 +266,10 @@ def build_state_query(include_new_cards: bool) -> str:
     return "(is:due OR is:new)" if include_new_cards else "(is:due -is:new)"
 
 
-def build_generation_prompt(words: Sequence[str]) -> str:
+def build_generation_prompt(words: Sequence[str], direction: str = RECOGNITION_DIRECTION) -> str:
     rendered_words = ", ".join(words)
-    return PROMPT_TEMPLATE.format(words=rendered_words)
+    template = PROMPT_TEMPLATES.get(direction, RECOGNITION_PROMPT_TEMPLATE)
+    return template.format(words=rendered_words)
 
 
 def normalize_surface_form(value: str) -> str:
@@ -292,15 +381,22 @@ def _highlight_cjk(sentence: str, targets: Sequence[str]) -> str:
     return _render_highlighted_spans(sentence, sorted(spans))
 
 
-def build_card_payload(card: Any) -> CardPayload:
+def build_card_payload(card: Any, direction: str = RECOGNITION_DIRECTION) -> CardPayload:
     note = card.note()
+    target = note[TARGET_FIELD].strip()
+    native = note[NATIVE_FIELD].strip()
+    prompt_text = native if direction == PRODUCTION_DIRECTION else target
+    answer_text = target if direction == PRODUCTION_DIRECTION else native
     return CardPayload(
         card=card,
         card_id=int(card.id),
         note_id=int(getattr(card, "nid", 0)),
         card_ord=int(getattr(card, "ord", -1)),
-        target=note[TARGET_FIELD].strip(),
-        native=note[NATIVE_FIELD].strip(),
+        target=target,
+        native=native,
+        direction=direction,
+        prompt_text=prompt_text,
+        answer_text=answer_text,
         example=note[EXAMPLE_FIELD].strip(),
         due=int(getattr(card, "due", 0)),
         queue=int(getattr(card, "queue")) if hasattr(card, "queue") else None,
@@ -341,6 +437,19 @@ def _contains_normalized_token(text: str, token: str) -> bool:
     return token in {normalize_surface_form(part) for part in text.split()}
 
 
+def find_direction_ord_issue(payloads: Sequence[CardPayload], direction: str) -> str | None:
+    expected_ord = CARD_ORD_BY_DIRECTION.get(direction)
+    if expected_ord is None:
+        return None
+    unexpected = [payload for payload in payloads if payload.card_ord != expected_ord]
+    if not unexpected:
+        return None
+    return (
+        "Stopped because the temporary AllAI deck mixed Recognition and Production cards. "
+        "Start a new session so AllAI can rebuild the filtered deck."
+    )
+
+
 def match_words_to_payloads(
     payloads: Sequence[CardPayload], words_used: Sequence[WordUsage]
 ) -> tuple[list[RoundRow], list[CardPayload]]:
@@ -357,6 +466,9 @@ def match_words_to_payloads(
             card_id=payload.card_id,
             target=payload.target,
             native=payload.native,
+            direction=payload.direction,
+            prompt_text=payload.prompt_text,
+            answer_text=payload.answer_text,
             example=payload.example,
             surface_form=matched_surfaces[payload.card_id],
             card=payload.card,
@@ -376,12 +488,12 @@ def _find_matching_payload(usage: WordUsage, payloads: Sequence[CardPayload]) ->
     for strategy in strategies:
         probe = strategy(usage.target.strip())
         for payload in payloads:
-            if strategy(payload.target.strip()) == probe:
+            if strategy(payload.prompt_text.strip()) == probe:
                 return payload
     for strategy in strategies:
         probe = strategy(usage.surface.strip())
         for payload in payloads:
-            if strategy(payload.target.strip()) == probe:
+            if strategy(payload.prompt_text.strip()) == probe:
                 return payload
     return None
 
@@ -417,18 +529,42 @@ class SessionRunner:
         self.col = col
         self.config = deep_merge_config(DEFAULT_CONFIG, config)
         self.llm_client = llm_client
+        self.card_mode = normalize_card_mode(self.config["session"].get("card_mode"))
+        self.last_direction: str | None = None
         self.reviewed_words = 0
         self.completed_rounds = 0
         self.skip_counts: dict[int, int] = {}
         self._messages: list[str] = []
 
-    def prepare_next_round(self) -> RoundData | None:
+    def choose_next_direction(self) -> str | None:
+        for direction in next_direction_order(self.card_mode, self.last_direction):
+            if self.count_matching_cards(direction) > 0:
+                return direction
+        return None
+
+    def count_matching_cards(self, direction: str) -> int:
+        query = build_search_query(
+            self.config.get("decks", []),
+            bool(self.config["session"]["include_new_cards"]),
+            direction,
+        )
+        return len(self.col.find_cards(query))
+
+    def prepare_next_round(self, direction: str | None = None) -> RoundData | None:
+        active_direction = direction or self.choose_next_direction()
+        if active_direction is None:
+            return None
+
         batch = self._select_batch()
         if not batch:
             return None
 
-        payloads = [build_card_payload(card) for card in batch]
+        payloads = [build_card_payload(card, active_direction) for card in batch]
         if not payloads:
+            return None
+        ord_issue = find_direction_ord_issue(payloads, active_direction)
+        if ord_issue is not None:
+            self._messages.append(ord_issue)
             return None
         issue = find_payload_issue(payloads[0])
         if issue is not None:
@@ -440,9 +576,12 @@ class SessionRunner:
             return None
 
         matched_targets = _highlight_targets_for_rows(attempt.rows)
+        self.last_direction = active_direction
         return RoundData(
             round_index=self.completed_rounds + 1,
             reviewed_words_before_round=self.reviewed_words,
+            direction=active_direction,
+            direction_label=direction_label(active_direction),
             sentence=attempt.sentence,
             sentence_html=highlight_sentence(attempt.sentence, matched_targets),
             rows=attempt.rows,
@@ -497,11 +636,14 @@ class SessionRunner:
         deck_filter = build_deck_filter(decks)
         any_cards_query = f"{state_query} ({deck_filter})"
         any_langcard_query = f"{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME}"
-        session_langcard_query = build_search_query(decks, include_new_cards)
+        direction_queries = [
+            build_search_query(decks, include_new_cards, direction)
+            for direction in configured_directions(self.card_mode)
+        ]
 
         any_matching = len(self.col.find_cards(any_cards_query))
         any_langcard_matching = len(self.col.find_cards(any_langcard_query))
-        session_langcard_matching = len(self.col.find_cards(session_langcard_query))
+        session_langcard_matching = sum(len(self.col.find_cards(query)) for query in direction_queries)
         if any_matching > 0 and any_langcard_matching == 0:
             return (
                 "The configured deck has due/new cards, but none of them use the LangCard note type. "
@@ -509,8 +651,8 @@ class SessionRunner:
             )
         if any_langcard_matching > 0 and session_langcard_matching == 0:
             return (
-                "The configured deck has due/new LangCard cards, but none are Recognition cards for AllAI. "
-                "Review the reverse Production cards in normal Anki, or wait until Recognition cards are due."
+                "The configured deck has due/new LangCard cards, but none match the selected AllAI card mode. "
+                "Switch the AllAI card mode or wait until matching cards are due."
             )
         return "Nothing due."
 
@@ -526,9 +668,9 @@ class SessionRunner:
             cards.append(card)
         return cards
 
-    def _generate_sentence_with_retry(self, words: Sequence[str]) -> dict[str, Any]:
+    def _generate_sentence_with_retry(self, words: Sequence[str], direction: str) -> dict[str, Any]:
         max_retries = int(self.config["session"]["max_llm_retries"])
-        prompt = build_generation_prompt(words)
+        prompt = build_generation_prompt(words, direction)
         attempts = max_retries + 1
         last_error: Exception | None = None
         for attempt in range(attempts):
@@ -548,9 +690,9 @@ class SessionRunner:
     def _prepare_attempt(self, payloads: Sequence[CardPayload]) -> PreparedAttempt | None:
         for size in range(len(payloads), 0, -1):
             subset = list(payloads[:size])
-            words = [payload.target for payload in subset]
+            words = [payload.prompt_text for payload in subset]
             try:
-                response = self._generate_sentence_with_retry(words)
+                response = self._generate_sentence_with_retry(words, subset[0].direction)
             except SentenceGenerationError:
                 continue
             sentence, words_used = parse_generation_payload(response)
@@ -584,8 +726,8 @@ class SessionRunner:
 def _highlight_targets_for_rows(rows: Sequence[RoundRow]) -> list[str]:
     targets: list[str] = []
     for row in rows:
-        targets.append(row.target)
-        if row.surface_form and normalize_surface_form(row.surface_form) != normalize_surface_form(row.target):
+        targets.append(row.prompt_text)
+        if row.surface_form and normalize_surface_form(row.surface_form) != normalize_surface_form(row.prompt_text):
             targets.append(row.surface_form)
     return targets
 

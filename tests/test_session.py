@@ -5,6 +5,7 @@ import unittest
 
 from session import (
     LLMUnavailableError,
+    PRODUCTION_DIRECTION,
     RoundCommitError,
     SentenceGenerationError,
     SessionRunner,
@@ -155,9 +156,11 @@ class FakeLLM:
     def __init__(self, responses: list[dict | Exception]) -> None:
         self.responses = responses
         self.calls = 0
+        self.prompts: list[str] = []
 
     def generate_sentence(self, prompt: str) -> dict:
         self.calls += 1
+        self.prompts.append(prompt)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -174,6 +177,10 @@ class SessionTests(unittest.TestCase):
             build_search_query(["Dutch", "Chinese"], False),
             '(is:due -is:new) (deck:"Dutch" OR deck:"Chinese") note:LangCard card:"Recognition"',
         )
+        self.assertEqual(
+            build_search_query(["Dutch"], True, PRODUCTION_DIRECTION),
+            '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Production"',
+        )
         self.assertEqual(build_state_query(True), "(is:due OR is:new)")
         self.assertEqual(build_deck_filter(["Dutch", "Chinese"]), 'deck:"Dutch" OR deck:"Chinese"')
 
@@ -182,6 +189,18 @@ class SessionTests(unittest.TestCase):
         self.assertIn("The entire sentence must be in the same target language", prompt)
         self.assertIn("Never switch into English or another language", prompt)
         self.assertIn("Only output an English sentence if every provided word is already English", prompt)
+
+    def test_build_generation_prompt_for_production_requires_english(self) -> None:
+        prompt = build_generation_prompt(["doctor", "appointment"], PRODUCTION_DIRECTION)
+        self.assertIn("natural English sentence", prompt)
+        self.assertIn("The entire sentence must be in English", prompt)
+        self.assertIn("doctor, appointment", prompt)
+
+    def test_build_card_payload_maps_production_prompt_and_answer(self) -> None:
+        payload = build_card_payload(FakeCard(1, "dokter", "doctor", ord=1), PRODUCTION_DIRECTION)
+        self.assertEqual(payload.direction, PRODUCTION_DIRECTION)
+        self.assertEqual(payload.prompt_text, "doctor")
+        self.assertEqual(payload.answer_text, "dokter")
 
     def test_match_words_to_payloads_uses_exact_casefold_and_punctuation_matching(self) -> None:
         payloads = [
@@ -228,6 +247,62 @@ class SessionTests(unittest.TestCase):
         self.assertEqual([row.card_id for row in rows], [1, 2])
         self.assertEqual([row.surface_form for row in rows], ["sprak", "dokter"])
         self.assertEqual(unmatched, [])
+
+    def test_match_words_to_payloads_uses_production_prompt_text(self) -> None:
+        payloads = [
+            build_card_payload(FakeCard(1, "dokter", "doctor", ord=1), PRODUCTION_DIRECTION),
+            build_card_payload(FakeCard(2, "afspraak", "appointment", ord=1), PRODUCTION_DIRECTION),
+        ]
+        _, words_used = parse_generation_payload(
+            {
+                "sentence": "The doctor confirmed my appointment.",
+                "words_used": [
+                    {"target": "doctor", "surface": "doctor"},
+                    {"target": "appointment", "surface": "appointment"},
+                ],
+            }
+        )
+        rows, unmatched = match_words_to_payloads(payloads, words_used)
+        self.assertEqual([row.card_id for row in rows], [1, 2])
+        self.assertEqual([row.prompt_text for row in rows], ["doctor", "appointment"])
+        self.assertEqual([row.answer_text for row in rows], ["dokter", "afspraak"])
+        self.assertEqual(unmatched, [])
+
+    def test_both_mode_alternates_available_directions(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        responses = {
+            '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Recognition"': [1],
+            '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Production"': [2],
+        }
+        runner = SessionRunner(ExplainCollection([], log, responses), {"decks": ["Dutch"]}, FakeLLM([]))
+        self.assertEqual(runner.choose_next_direction(), "recognition")
+        runner.last_direction = "recognition"
+        self.assertEqual(runner.choose_next_direction(), PRODUCTION_DIRECTION)
+
+    def test_prepare_next_round_uses_production_sentence_and_rows(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection([FakeCard(1, "dokter", "doctor", ord=1)], log)
+        llm = FakeLLM(
+            [
+                {
+                    "sentence": "The doctor is here.",
+                    "words_used": [{"target": "doctor", "surface": "doctor"}],
+                }
+            ]
+        )
+        runner = SessionRunner(
+            col,
+            {"decks": ["Dutch"], "session": {"card_mode": PRODUCTION_DIRECTION}},
+            llm,
+        )
+        round_data = runner.prepare_next_round(PRODUCTION_DIRECTION)
+        assert round_data is not None
+        self.assertEqual(round_data.direction, PRODUCTION_DIRECTION)
+        self.assertEqual(round_data.direction_label, "Production")
+        self.assertEqual(round_data.rows[0].prompt_text, "doctor")
+        self.assertEqual(round_data.rows[0].answer_text, "dokter")
+        self.assertIn("natural English sentence", llm.prompts[0])
+
 
     def test_find_payload_issue_flags_identical_target_native_with_mismatched_example_language(self) -> None:
         payload = build_card_payload(
@@ -354,7 +429,6 @@ class SessionTests(unittest.TestCase):
 
         queue_fetch_indexes = [index for index, entry in enumerate(log) if entry == ("queue_fetch", 4)]
         answer_indexes = [index for index, entry in enumerate(log) if entry[0] == "answer"]
-        self.assertEqual(queue_fetch_indexes[0], 0)
         self.assertEqual([log[index] for index in answer_indexes], [("answer", 1), ("answer", 2)])
         self.assertTrue(all(index < queue_fetch_indexes[1] for index in answer_indexes))
 
@@ -449,7 +523,7 @@ class SessionTests(unittest.TestCase):
         col = ExplainCollection([], log, responses)
         runner = SessionRunner(col, {"decks": ["dutch cursus"]}, FakeLLM([]))
         message = runner.explain_why_no_cards()
-        self.assertIn("none are Recognition cards for AllAI", message)
+        self.assertIn("none match the selected AllAI card mode", message)
 
 
 if __name__ == "__main__":
