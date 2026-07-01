@@ -19,6 +19,8 @@ EXAMPLE_FIELD = "Example"
 
 EASE = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 
+DEFAULT_CEFR_LEVEL = "b1"
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "base_url": "https://api.openai.com/v1",
@@ -31,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "include_new_cards": True,
         "due_only": False,
         "card_mode": CARD_MODE_BOTH,
+        "cefr_level": DEFAULT_CEFR_LEVEL,
         "max_llm_retries": 1,
     },
 }
@@ -87,6 +90,21 @@ PROMPT_TEMPLATES = {
     RECOGNITION_DIRECTION: RECOGNITION_PROMPT_TEMPLATE,
     PRODUCTION_DIRECTION: PRODUCTION_PROMPT_TEMPLATE,
 }
+
+CEFR_LEVELS = ["a1", "a2", "b1", "b2", "c1", "c2"]
+CEFR_PROMPT_LINES = {
+    "a1": "Write at CEFR level A1: use only the most basic, high-frequency words and very short, simple present-tense sentences.",
+    "a2": "Write at CEFR level A2: use simple everyday words and short, plain sentences.",
+    "b1": "Write at CEFR level B1: use common everyday vocabulary and natural sentences of moderate length.",
+    "b2": "Write at CEFR level B2: use a broader vocabulary and more varied, connected sentence structures.",
+    "c1": "Write at CEFR level C1: use rich, precise vocabulary and complex sentences; idiomatic phrasing is welcome.",
+    "c2": "Write at CEFR level C2: use sophisticated, nuanced, fully idiomatic language and complex structures.",
+}
+
+
+def normalize_cefr_level(value: Any) -> str:
+    level = str(value or "").strip().casefold()
+    return level if level in CEFR_LEVELS else DEFAULT_CEFR_LEVEL
 
 CARD_TEMPLATE_BY_DIRECTION = {
     RECOGNITION_DIRECTION: RECOGNITION_CARD_TEMPLATE_NAME,
@@ -298,10 +316,19 @@ def build_state_query(include_new_cards: bool) -> str:
     return "(is:due OR is:new)" if include_new_cards else "(is:due -is:new)"
 
 
-def build_generation_prompt(words: Sequence[str], direction: str = RECOGNITION_DIRECTION) -> str:
+def build_generation_prompt(
+    words: Sequence[str],
+    direction: str = RECOGNITION_DIRECTION,
+    cefr_level: str | None = None,
+) -> str:
     rendered_words = ", ".join(words)
     template = PROMPT_TEMPLATES.get(direction, RECOGNITION_PROMPT_TEMPLATE)
-    return template.format(words=rendered_words)
+    prompt = template.format(words=rendered_words)
+    if cefr_level:
+        instruction = CEFR_PROMPT_LINES.get(normalize_cefr_level(cefr_level))
+        if instruction:
+            prompt = f"{prompt}\n\n{instruction}"
+    return prompt
 
 
 def normalize_surface_form(value: str) -> str:
@@ -562,6 +589,7 @@ class SessionRunner:
         self.config = deep_merge_config(DEFAULT_CONFIG, config)
         self.llm_client = llm_client
         self.card_mode = normalize_card_mode(self.config["session"].get("card_mode"))
+        self.cefr_level = normalize_cefr_level(self.config["session"].get("cefr_level"))
         # When due_only is set, never pull new cards into the session even if
         # include_new_cards is on, so the due/review backlog gets cleared first.
         self.include_new_cards = bool(self.config["session"]["include_new_cards"]) and not bool(
@@ -781,7 +809,7 @@ class SessionRunner:
 
     def _generate_sentence_with_retry(self, words: Sequence[str], direction: str) -> dict[str, Any]:
         max_retries = int(self.config["session"]["max_llm_retries"])
-        prompt = build_generation_prompt(words, direction)
+        prompt = build_generation_prompt(words, direction, self.cefr_level)
         attempts = max_retries + 1
         last_error: Exception | None = None
         for attempt in range(attempts):

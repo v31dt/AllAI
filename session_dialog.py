@@ -25,6 +25,7 @@ from aqt.utils import showInfo, showWarning, tooltip
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .llm_client import OpenAICompatibleClient
     from .session import (
+        CEFR_LEVELS,
         DEFAULT_CONFIG,
         LLMUnavailableError,
         RoundCommitError,
@@ -32,10 +33,12 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
         SessionRunner,
         build_filtered_deck_searches,
         deep_merge_config,
+        normalize_cefr_level,
     )
 except ImportError:  # pragma: no cover
     from llm_client import OpenAICompatibleClient
     from session import (
+        CEFR_LEVELS,
         DEFAULT_CONFIG,
         LLMUnavailableError,
         RoundCommitError,
@@ -43,6 +46,7 @@ except ImportError:  # pragma: no cover
         SessionRunner,
         build_filtered_deck_searches,
         deep_merge_config,
+        normalize_cefr_level,
     )
 
 FILTERED_DECK_NAME = "AllAI Session"
@@ -112,8 +116,9 @@ class SessionLaunchDialog(QDialog):
         self.mw = mw
         self.config = self._load_config()
         self.deck_combo = QComboBox()
+        self.level_combo = QComboBox()
         self.setWindowTitle("Start AllAI Session")
-        self.resize(420, 120)
+        self.resize(420, 150)
         self._build_ui()
 
     def _load_config(self) -> dict[str, Any]:
@@ -132,18 +137,54 @@ class SessionLaunchDialog(QDialog):
             for deck in sorted(self.mw.col.decks.all(), key=lambda item: item["name"].casefold()):
                 self.deck_combo.addItem(deck["name"], deck["name"])
         form.addRow("Run session for", self.deck_combo)
+
+        for level in CEFR_LEVELS:
+            self.level_combo.addItem(level.upper(), level)
+        form.addRow("Sentence level (CEFR)", self.level_combo)
         layout.addLayout(form)
+
+        self._restore_last_selection()
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
+    def _restore_last_selection(self) -> None:
+        session = self.config.get("session", {})
+        last_deck = session.get("last_deck")
+        if last_deck is not None:
+            deck_index = self.deck_combo.findData(last_deck)
+            if deck_index >= 0:
+                self.deck_combo.setCurrentIndex(deck_index)
+        level_index = self.level_combo.findData(normalize_cefr_level(session.get("cefr_level")))
+        if level_index >= 0:
+            self.level_combo.setCurrentIndex(level_index)
+
     def selected_decks(self) -> list[str]:
         value = self.deck_combo.currentData()
         if value == ALL_CONFIGURED_DECKS:
             return list(self.config.get("decks", []))
         return [value] if value else list(self.config.get("decks", []))
+
+    def selected_level(self) -> str:
+        return normalize_cefr_level(self.level_combo.currentData())
+
+    def accept(self) -> None:
+        self._persist_selection()
+        super().accept()
+
+    def _persist_selection(self) -> None:
+        # Remember the deck and level so they're pre-selected next time, and so
+        # the running session picks up the chosen difficulty.
+        try:
+            raw = self.mw.addonManager.getConfig(__name__) or {}
+            session = raw.setdefault("session", {})
+            session["cefr_level"] = self.selected_level()
+            session["last_deck"] = self.deck_combo.currentData()
+            self.mw.addonManager.writeConfig(__name__, raw)
+        except Exception:
+            pass
 
 
 class WordRowWidget(QWidget):

@@ -10,6 +10,7 @@
     "include_new_cards": true,
     "due_only": false,
     "card_mode": "both",
+    "cefr_level": "b1",
     "max_llm_retries": 1
   }
 }

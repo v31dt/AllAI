@@ -19,6 +19,7 @@ from session import (
     find_payload_issue,
     highlight_sentence,
     match_words_to_payloads,
+    normalize_cefr_level,
     parse_generation_payload,
 )
 
@@ -238,6 +239,27 @@ class SessionTests(unittest.TestCase):
         self.assertIn("The entire sentence must be in the same target language", prompt)
         self.assertIn("Never switch into English or another language", prompt)
         self.assertIn("Only output an English sentence if every provided word is already English", prompt)
+
+    def test_normalize_cefr_level_validates_and_defaults(self) -> None:
+        self.assertEqual(normalize_cefr_level("A2"), "a2")
+        self.assertEqual(normalize_cefr_level("c1"), "c1")
+        self.assertEqual(normalize_cefr_level("nonsense"), "b1")
+        self.assertEqual(normalize_cefr_level(None), "b1")
+
+    def test_build_generation_prompt_appends_cefr_instruction(self) -> None:
+        prompt = build_generation_prompt(["rok"], RECOGNITION_DIRECTION, "a1")
+        self.assertIn("CEFR level A1", prompt)
+        self.assertIn("very short", prompt)
+        # Without a level, no difficulty line is added.
+        self.assertNotIn("CEFR level", build_generation_prompt(["rok"]))
+
+    def test_runner_uses_configured_cefr_level_in_prompt(self) -> None:
+        col = FakeCollection([FakeCard(1, "dokter", "doctor")], [])
+        llm = FakeLLM([{"sentence": "Mijn dokter komt.", "words_used": ["dokter"]}])
+        runner = SessionRunner(col, {"decks": ["Dutch"], "session": {"cefr_level": "c2"}}, llm)
+        self.assertEqual(runner.cefr_level, "c2")
+        runner.prepare_next_round()
+        self.assertIn("CEFR level C2", llm.prompts[0])
 
     def test_build_generation_prompt_for_production_requires_english(self) -> None:
         prompt = build_generation_prompt(["doctor", "appointment"], PRODUCTION_DIRECTION)
