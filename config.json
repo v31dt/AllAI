@@ -8,8 +8,8 @@
   "session": {
     "words_per_sentence": 4,
     "include_new_cards": true,
+    "due_only": false,
     "card_mode": "both",
-    "max_llm_retries": 1,
-    "max_skip_attempts_per_card": 3
+    "max_llm_retries": 1
   }
 }

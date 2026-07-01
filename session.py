@@ -29,9 +29,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "session": {
         "words_per_sentence": 4,
         "include_new_cards": True,
+        "due_only": False,
         "card_mode": CARD_MODE_BOTH,
         "max_llm_retries": 1,
-        "max_skip_attempts_per_card": 3,
     },
 }
 
@@ -245,32 +245,45 @@ def build_search_query(
     decks: Sequence[str],
     include_new_cards: bool,
     direction: str = RECOGNITION_DIRECTION,
+    exclude_card_ids: Sequence[int] | None = None,
 ) -> str:
     state = build_state_query(include_new_cards)
-    return build_search_query_for_state(decks, state, direction)
+    return build_search_query_for_state(decks, state, direction, exclude_card_ids)
 
 
 def build_search_query_for_state(
     decks: Sequence[str],
     state_query: str,
     direction: str = RECOGNITION_DIRECTION,
+    exclude_card_ids: Sequence[int] | None = None,
 ) -> str:
     usable_decks = [deck.strip() for deck in decks if deck.strip()]
     if not usable_decks:
         raise ValueError("At least one deck must be configured.")
     deck_filter = build_deck_filter(usable_decks)
     template = CARD_TEMPLATE_BY_DIRECTION.get(direction, RECOGNITION_CARD_TEMPLATE_NAME)
-    return f'{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{template}"'
+    query = f'{state_query} ({deck_filter}) note:{NOTE_TYPE_NAME} card:"{template}"'
+    return query + build_card_exclusion_clause(exclude_card_ids)
+
+
+def build_card_exclusion_clause(exclude_card_ids: Sequence[int] | None) -> str:
+    ids = sorted({int(card_id) for card_id in exclude_card_ids or ()})
+    if not ids:
+        return ""
+    return " -(cid:" + ",".join(str(card_id) for card_id in ids) + ")"
 
 
 def build_filtered_deck_searches(
     decks: Sequence[str],
     include_new_cards: bool,
     direction: str = RECOGNITION_DIRECTION,
+    exclude_card_ids: Sequence[int] | None = None,
 ) -> list[str]:
-    searches = [build_search_query_for_state(decks, build_state_query(False), direction)]
+    searches = [
+        build_search_query_for_state(decks, build_state_query(False), direction, exclude_card_ids)
+    ]
     if include_new_cards:
-        searches.append(build_search_query_for_state(decks, "is:new", direction))
+        searches.append(build_search_query_for_state(decks, "is:new", direction, exclude_card_ids))
     return searches
 
 
@@ -549,11 +562,22 @@ class SessionRunner:
         self.config = deep_merge_config(DEFAULT_CONFIG, config)
         self.llm_client = llm_client
         self.card_mode = normalize_card_mode(self.config["session"].get("card_mode"))
+        # When due_only is set, never pull new cards into the session even if
+        # include_new_cards is on, so the due/review backlog gets cleared first.
+        self.include_new_cards = bool(self.config["session"]["include_new_cards"]) and not bool(
+            self.config["session"].get("due_only", False)
+        )
         self.last_direction: str | None = None
         self.reviewed_words = 0
         self.completed_rounds = 0
-        self.skip_counts: dict[int, int] = {}
+        self.answered_card_ids: set[int] = set()
+        self.skipped_card_ids: set[int] = set()
         self._messages: list[str] = []
+
+    def excluded_card_ids(self) -> set[int]:
+        """Cards that must not be offered again this session: already answered,
+        or skipped because they could not be turned into a valid sentence."""
+        return self.answered_card_ids | self.skipped_card_ids
 
     def choose_next_direction(self) -> str | None:
         for direction in next_direction_order(self.card_mode, self.last_direction):
@@ -561,11 +585,39 @@ class SessionRunner:
                 return direction
         return None
 
+    def new_card_limit(self) -> int:
+        """How many new cards AllAI may still introduce today, following Anki's
+        own daily new-card pacing. Each introduction is credited to the deck's
+        newToday counter (see _credit_new_cards_studied), so this stays correct
+        across rounds, across sessions, and alongside normal Anki review."""
+        if not self.include_new_cards:
+            return 0
+        try:
+            per_day_total = 0
+            done_total = 0
+            today = self.col.sched.today
+            for name in self.config.get("decks", []):
+                deck = self.col.decks.by_name(name)
+                if deck is None:
+                    continue
+                conf = self.col.decks.config_dict_for_deck_id(int(deck["id"]))
+                per_day_total += int(conf["new"]["perDay"])
+                new_today = deck.get("newToday", [today, 0])
+                done_total += int(new_today[1]) if new_today[0] == today else 0
+            return max(0, per_day_total - done_total)
+        except Exception:
+            return 1_000_000
+
     def count_matching_cards(self, direction: str) -> int:
+        # Only count new cards while the day's new allowance is unspent; otherwise
+        # the session would pick a direction whose only remaining cards are new
+        # ones the capped filtered deck won't actually serve, and stall.
+        include_new = self.include_new_cards and self.new_card_limit() > 0
         query = build_search_query(
             self.config.get("decks", []),
-            bool(self.config["session"]["include_new_cards"]),
+            include_new,
             direction,
+            self.excluded_card_ids(),
         )
         return len(self.col.find_cards(query))
 
@@ -587,7 +639,8 @@ class SessionRunner:
             return None
         issue = find_payload_issue(payloads[0])
         if issue is not None:
-            self._messages.append(f"Stopped because the next queued card looks malformed: {issue}.")
+            self.skipped_card_ids.add(payloads[0].card_id)
+            self._messages.append(f"Skipped a malformed card ({issue}); review it normally.")
             return None
 
         attempt = self._prepare_attempt(payloads)
@@ -610,6 +663,14 @@ class SessionRunner:
         missing = [row.card_id for row in round_data.rows if row.card_id not in ratings]
         if missing:
             raise ValueError("All words in the round must be rated before commit.")
+
+        # Capture new cards (and their home decks) before answering, so we can
+        # credit Anki's daily new-card counter once the round commits.
+        new_home_decks = [
+            int(getattr(row.card, "odid", 0)) or int(getattr(row.card, "did", 0))
+            for row in round_data.rows
+            if int(getattr(row.card, "type", -1)) == 0
+        ]
 
         undo_entry = None
         if hasattr(self.col, "add_custom_undo_entry") and hasattr(self.col, "merge_undo_entries"):
@@ -642,6 +703,34 @@ class SessionRunner:
 
         self.reviewed_words += len(round_data.rows)
         self.completed_rounds += 1
+        self._credit_new_cards_studied(new_home_decks)
+        self.answered_card_ids.update(row.card_id for row in round_data.rows)
+
+    def _credit_new_cards_studied(self, home_deck_ids: Sequence[int]) -> None:
+        """Tick Anki's daily new-card counter for each new card AllAI introduced.
+        The filtered-deck pile doesn't do this on its own, so without it the shown
+        new count never drops and the daily cap would reset every session."""
+        if not home_deck_ids:
+            return
+        try:
+            today = self.col.sched.today
+        except Exception:
+            return
+        counts: dict[int, int] = {}
+        for deck_id in home_deck_ids:
+            if deck_id:
+                counts[deck_id] = counts.get(deck_id, 0) + 1
+        for deck_id, count in counts.items():
+            try:
+                deck = self.col.decks.get(deck_id)
+                if deck is None:
+                    continue
+                new_today = deck.get("newToday") or [today, 0]
+                base = int(new_today[1]) if new_today[0] == today else 0
+                deck["newToday"] = [today, base + count]
+                self.col.decks.save(deck)
+            except Exception:
+                continue
 
     def drain_messages(self) -> list[str]:
         messages = list(self._messages)
@@ -650,7 +739,7 @@ class SessionRunner:
 
     def explain_why_no_cards(self) -> str:
         decks = self.config.get("decks", [])
-        include_new_cards = bool(self.config["session"]["include_new_cards"])
+        include_new_cards = self.include_new_cards
         state_query = build_state_query(include_new_cards)
         deck_filter = build_deck_filter(decks)
         any_cards_query = f"{state_query} ({deck_filter})"
@@ -679,8 +768,11 @@ class SessionRunner:
         batch_size = int(self.config["session"]["words_per_sentence"])
         queued = self.col.sched.get_queued_cards(fetch_limit=batch_size)
         cards: list[Any] = []
+        excluded = self.excluded_card_ids()
         for queued_card in queued.cards:
             card_id = int(queued_card.card.id)
+            if card_id in excluded:
+                continue
             card = self.col.get_card(card_id)
             if hasattr(card, "start_timer"):
                 card.start_timer()
@@ -726,19 +818,13 @@ class SessionRunner:
             return PreparedAttempt(sentence=sentence, rows=schedulable_rows)
 
         lead_card = payloads[0]
-        current = self.skip_counts.get(lead_card.card_id, 0) + 1
-        self.skip_counts[lead_card.card_id] = current
-        limit = int(self.config["session"]["max_skip_attempts_per_card"])
-        if current >= limit:
-            self._messages.append(
-                "Stopped because the next queued card could not be turned into a valid sentence. "
-                "Finish it in normal review, then start a new session."
-            )
-        else:
-            self._messages.append(
-                "Could not generate a schedulable sentence for the next queued card. "
-                "Try starting the session again or review that card normally first."
-            )
+        # The lead card couldn't be worked into a sentence (and Anki forces us to
+        # answer the top of the queue first). Skip it for this session and let the
+        # caller move on to the next card instead of ending the whole session.
+        self.skipped_card_ids.add(lead_card.card_id)
+        self._messages.append(
+            "Skipped a card that couldn't be turned into a sentence; review it normally."
+        )
         return None
 
 

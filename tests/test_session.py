@@ -6,6 +6,7 @@ import unittest
 from session import (
     LLMUnavailableError,
     PRODUCTION_DIRECTION,
+    RECOGNITION_DIRECTION,
     RoundCommitError,
     SentenceGenerationError,
     SessionRunner,
@@ -198,6 +199,40 @@ class SessionTests(unittest.TestCase):
             ['(is:due -is:new) (deck:"Dutch") note:LangCard card:"Production"'],
         )
 
+    def test_build_filtered_deck_searches_excludes_answered_cards(self) -> None:
+        self.assertEqual(
+            build_filtered_deck_searches(["Dutch"], True, RECOGNITION_DIRECTION, [12, 7, 7]),
+            [
+                '(is:due -is:new) (deck:"Dutch") note:LangCard card:"Recognition" -(cid:7,12)',
+                'is:new (deck:"Dutch") note:LangCard card:"Recognition" -(cid:7,12)',
+            ],
+        )
+        self.assertEqual(
+            build_search_query(["Dutch"], True, RECOGNITION_DIRECTION, []),
+            '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Recognition"',
+        )
+
+    def test_due_only_overrides_include_new_cards(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = ExplainCollection([], log, {})
+        runner = SessionRunner(
+            col,
+            {"decks": ["Dutch"], "session": {"include_new_cards": True, "due_only": True}},
+            FakeLLM([]),
+        )
+        self.assertFalse(runner.include_new_cards)
+        runner.count_matching_cards(RECOGNITION_DIRECTION)
+        self.assertIn("(is:due -is:new)", str(log[-1][1]))
+        self.assertNotIn("is:due OR is:new", str(log[-1][1]))
+
+    def test_due_only_off_keeps_new_cards(self) -> None:
+        runner = SessionRunner(
+            FakeCollection([], []),
+            {"decks": ["Dutch"], "session": {"include_new_cards": True, "due_only": False}},
+            FakeLLM([]),
+        )
+        self.assertTrue(runner.include_new_cards)
+
     def test_build_generation_prompt_forbids_switching_to_english(self) -> None:
         prompt = build_generation_prompt(["rok", "plein", "weet"])
         self.assertIn("The entire sentence must be in the same target language", prompt)
@@ -288,7 +323,11 @@ class SessionTests(unittest.TestCase):
             '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Recognition"': [1],
             '(is:due OR is:new) (deck:"Dutch") note:LangCard card:"Production"': [2],
         }
-        runner = SessionRunner(ExplainCollection([], log, responses), {"decks": ["Dutch"]}, FakeLLM([]))
+        runner = SessionRunner(
+            ExplainCollection([], log, responses),
+            {"decks": ["Dutch"], "session": {"due_only": False}},
+            FakeLLM([]),
+        )
         self.assertEqual(runner.choose_next_direction(), "recognition")
         runner.last_direction = "recognition"
         self.assertEqual(runner.choose_next_direction(), PRODUCTION_DIRECTION)
@@ -332,7 +371,7 @@ class SessionTests(unittest.TestCase):
         assert issue is not None
         self.assertIn('Target and Native are both "airplane"', issue)
 
-    def test_prepare_next_round_stops_on_malformed_lead_card(self) -> None:
+    def test_prepare_next_round_skips_malformed_lead_card(self) -> None:
         log: list[tuple[str, int | str]] = []
         col = FakeCollection(
             [FakeCard(1, "airplane", "airplane", 'Het vliegtuig vliegt hoog. – "The airplane flies high."')],
@@ -341,7 +380,8 @@ class SessionTests(unittest.TestCase):
         runner = SessionRunner(col, {"decks": ["Dutch"]}, FakeLLM([]))
         round_data = runner.prepare_next_round()
         self.assertIsNone(round_data)
-        self.assertIn("looks malformed", runner.drain_messages()[0])
+        self.assertIn(1, runner.skipped_card_ids)
+        self.assertIn("Skipped a malformed card", runner.drain_messages()[0])
 
     def test_highlight_sentence_handles_whitespace_and_cjk_text(self) -> None:
         self.assertEqual(
@@ -387,7 +427,7 @@ class SessionTests(unittest.TestCase):
         self.assertIsNotNone(round_data)
         self.assertEqual(llm.calls, 2)
 
-    def test_prepare_next_round_drops_unmatchable_card_after_three_attempts(self) -> None:
+    def test_prepare_next_round_skips_unmatchable_lead_card(self) -> None:
         log: list[tuple[str, int | str]] = []
         col = FakeCollection([FakeCard(1, "dokter", "doctor")], log)
         llm = FakeLLM(
@@ -395,10 +435,34 @@ class SessionTests(unittest.TestCase):
                 {"sentence": "Een zin zonder match.", "words_used": ["onbekend"]},
             ]
         )
-        runner = SessionRunner(col, {"decks": ["Dutch"], "session": {"max_skip_attempts_per_card": 1}}, llm)
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
         round_data = runner.prepare_next_round()
         self.assertIsNone(round_data)
-        self.assertEqual(runner.skip_counts[1], 1)
+        # The lead card couldn't be sentenced, so it is skipped (left for normal
+        # review) instead of stopping the session.
+        self.assertIn(1, runner.skipped_card_ids)
+        self.assertIn(1, runner.excluded_card_ids())
+
+    def test_skipped_lead_card_lets_next_card_be_served(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection([FakeCard(1, "dokter", "doctor"), FakeCard(2, "fiets", "bike")], log)
+        llm = FakeLLM(
+            [
+                # First round, batch [1, 2]: tries size 2 then size 1, both unmatchable.
+                {"sentence": "Een zin zonder match.", "words_used": ["onbekend"]},
+                {"sentence": "Een zin zonder match.", "words_used": ["onbekend"]},
+                # Second round, batch [2] only: card 2 works.
+                {"sentence": "Ik pak de fiets.", "words_used": ["fiets"]},
+            ]
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
+        first = runner.prepare_next_round()
+        self.assertIsNone(first)
+        self.assertIn(1, runner.skipped_card_ids)
+        # Next attempt skips card 1 and builds a round from card 2.
+        second = runner.prepare_next_round()
+        assert second is not None
+        self.assertEqual([row.card_id for row in second.rows], [2])
 
     def test_prepare_next_round_reduces_batch_until_queue_prefix_is_schedulable(self) -> None:
         log: list[tuple[str, int | str]] = []
@@ -445,6 +509,69 @@ class SessionTests(unittest.TestCase):
         answer_indexes = [index for index, entry in enumerate(log) if entry[0] == "answer"]
         self.assertEqual([log[index] for index in answer_indexes], [("answer", 1), ("answer", 2)])
         self.assertTrue(all(index < queue_fetch_indexes[1] for index in answer_indexes))
+
+    def test_commit_round_records_answered_card_ids(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        cards = [
+            FakeCard(1, "dokter", "doctor", due=1),
+            FakeCard(2, "afspraak", "appointment", due=2),
+        ]
+        col = FakeCollection(cards, log)
+        llm = FakeLLM(
+            [
+                {
+                    "sentence": "Mijn dokter heeft een afspraak.",
+                    "words_used": ["dokter", "afspraak"],
+                }
+            ]
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
+        round_data = runner.prepare_next_round()
+        assert round_data is not None
+
+        runner.commit_round(round_data, {1: "good", 2: "easy"})
+        self.assertEqual(runner.answered_card_ids, {1, 2})
+
+    def test_commit_failure_does_not_record_answered_card_ids(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        cards = [
+            FakeCard(1, "dokter", "doctor", due=1),
+            FakeCard(2, "afspraak", "appointment", due=2),
+        ]
+        col = FakeCollection(cards, log, fail_on_answer_number=2)
+        llm = FakeLLM(
+            [
+                {
+                    "sentence": "Mijn dokter heeft een afspraak.",
+                    "words_used": ["dokter", "afspraak"],
+                }
+            ]
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, llm)
+        round_data = runner.prepare_next_round()
+        assert round_data is not None
+
+        with self.assertRaises(RoundCommitError):
+            runner.commit_round(round_data, {1: "good", 2: "easy"})
+        self.assertEqual(runner.answered_card_ids, set())
+
+    def test_answered_cards_excluded_from_counting_and_selection(self) -> None:
+        # Reproduces the livelock: a card that stays "due" after being answered
+        # (e.g. a review card rated Again becomes relearning and still matches
+        # is:due) must not be offered again within the same session.
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection([FakeCard(1, "dokter", "doctor", due=1)], log)
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, FakeLLM([]))
+
+        self.assertEqual(runner.count_matching_cards(RECOGNITION_DIRECTION), 1)
+        runner.answered_card_ids.add(1)
+
+        counting_query = log[-1][1]
+        self.assertNotIn("-(cid:", str(counting_query))
+        runner.count_matching_cards(RECOGNITION_DIRECTION)
+        self.assertIn("-(cid:1)", str(log[-1][1]))
+        # The defensive filter drops already-answered cards from the batch too.
+        self.assertEqual(runner._select_batch(), [])
 
     def test_commit_round_rolls_back_partial_answers_when_later_answer_fails(self) -> None:
         log: list[tuple[str, int | str]] = []
@@ -523,7 +650,7 @@ class SessionTests(unittest.TestCase):
             '(is:due OR is:new) (deck:"dutch cursus") note:LangCard card:"Recognition"': [],
         }
         col = ExplainCollection([], log, responses)
-        runner = SessionRunner(col, {"decks": ["dutch cursus"]}, FakeLLM([]))
+        runner = SessionRunner(col, {"decks": ["dutch cursus"], "session": {"due_only": False}}, FakeLLM([]))
         message = runner.explain_why_no_cards()
         self.assertIn("none of them use the LangCard note type", message)
 
@@ -535,7 +662,7 @@ class SessionTests(unittest.TestCase):
             '(is:due OR is:new) (deck:"dutch cursus") note:LangCard card:"Recognition"': [],
         }
         col = ExplainCollection([], log, responses)
-        runner = SessionRunner(col, {"decks": ["dutch cursus"]}, FakeLLM([]))
+        runner = SessionRunner(col, {"decks": ["dutch cursus"], "session": {"due_only": False}}, FakeLLM([]))
         message = runner.explain_why_no_cards()
         self.assertIn("none match the selected AllAI card mode", message)
 

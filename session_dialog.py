@@ -271,6 +271,11 @@ class SessionDialog(QDialog):
         self.sentence_label.setWordWrap(True)
         self.sentence_label.setTextFormat(Qt.TextFormat.RichText)
         self.sentence_label.setStyleSheet("font-size: 22px; padding: 8px 0;")
+        # Let the sentence be highlighted with the mouse and copied (Ctrl+C or the
+        # right-click menu). Mouse-only so it doesn't swallow the rating/navigation
+        # keyboard shortcuts.
+        self.sentence_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.sentence_label.setCursor(Qt.CursorShape.IBeamCursor)
         root.addWidget(self.sentence_label)
 
         self.status_label = QLabel("")
@@ -330,32 +335,55 @@ class SessionDialog(QDialog):
         del config.search_terms[:]
         search_terms = build_filtered_deck_searches(
             self.config.get("decks", []),
-            bool(self.config["session"]["include_new_cards"]),
+            self.runner.include_new_cards,
             direction,
+            self.runner.excluded_card_ids(),
         )
         term_limit = max(1000, int(self.config["session"]["words_per_sentence"]) * 250)
+        new_limit = self.runner.new_card_limit()
         for search in search_terms:
+            # The new-card term is gathered only up to Anki's remaining daily new
+            # allowance, so new words trickle in at Anki's pace instead of flooding.
+            is_new_term = search.startswith("is:new")
             term = config.search_terms.add()
             term.search = search
-            term.limit = term_limit
+            term.limit = new_limit if is_new_term else term_limit
             term.order = FILTERED_ORDER_DUE
         out = self.mw.col.sched.add_or_update_filtered_deck(deck)
         self.session_deck_id = int(out.id)
         self.mw.col.decks.select(self.session_deck_id)
         self.mw.reset()
 
-    def _load_next_round(self, *, show_empty_message: bool) -> None:
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
+    def _prepare_round_skipping_unusable(self) -> RoundData | None:
+        # A card Anki puts at the top of the queue might not be turnable into a
+        # sentence. Since Anki only lets us answer the top card, we can't reach
+        # past it -- so skip it (it stays for normal review), rebuild the pile
+        # without it, and try the next card instead of ending the session.
+        max_attempts = 200
+        for _ in range(max_attempts):
             if self.session_deck_id is not None:
                 self.mw.col.sched.empty_filtered_deck(self.session_deck_id)
             direction = self.runner.choose_next_direction()
             if direction is None:
-                self.current_round = None
-            else:
-                self._setup_session_deck(direction)
-                self.current_round = self.runner.prepare_next_round(direction)
+                return None
+            skipped_before = len(self.runner.skipped_card_ids)
+            self._setup_session_deck(direction)
+            round_data = self.runner.prepare_next_round(direction)
+            if round_data is not None:
+                return round_data
+            if len(self.runner.skipped_card_ids) == skipped_before:
+                # Failed for a reason that isn't a skippable card (e.g. mixed-ord
+                # deck or an empty batch) -- stop rather than spin.
+                return None
+            # A card was skipped; drop its tooltip noise and try the next one.
+            self.runner.drain_messages()
+        return None
+
+    def _load_next_round(self, *, show_empty_message: bool) -> None:
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        try:
+            self.current_round = self._prepare_round_skipping_unusable()
         except LLMUnavailableError as exc:
             self._restore_cursor()
             self._cleanup_session_deck()
