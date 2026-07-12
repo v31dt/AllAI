@@ -16,6 +16,7 @@ PRODUCTION_CARD_TEMPLATE_NAME = "Production"
 TARGET_FIELD = "Target"
 NATIVE_FIELD = "Native"
 EXAMPLE_FIELD = "Example"
+READING_FIELD = "Reading"
 
 EASE = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 
@@ -174,6 +175,7 @@ class CardPayload:
     due: int
     queue: int | None = None
     card_type: int | None = None
+    reading: str = ""
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,7 @@ class RoundRow:
     example: str
     surface_form: str
     card: Any
+    reading: str = ""
 
 
 @dataclass
@@ -440,12 +443,21 @@ def _highlight_cjk(sentence: str, targets: Sequence[str]) -> str:
     return _render_highlighted_spans(sentence, sorted(spans))
 
 
+def compose_answer_text(target: str, native: str, reading: str, direction: str) -> str:
+    if direction == PRODUCTION_DIRECTION:
+        return f"{target} ({reading})" if reading else target
+    if reading and native:
+        return f"{reading} — {native}"
+    return reading or native
+
+
 def build_card_payload(card: Any, direction: str = RECOGNITION_DIRECTION) -> CardPayload:
     note = card.note()
     target = note[TARGET_FIELD].strip()
     native = note[NATIVE_FIELD].strip()
+    reading = note[READING_FIELD].strip() if READING_FIELD in note else ""
     prompt_text = native if direction == PRODUCTION_DIRECTION else target
-    answer_text = target if direction == PRODUCTION_DIRECTION else native
+    answer_text = compose_answer_text(target, native, reading, direction)
     return CardPayload(
         card=card,
         card_id=int(card.id),
@@ -460,6 +472,7 @@ def build_card_payload(card: Any, direction: str = RECOGNITION_DIRECTION) -> Car
         due=int(getattr(card, "due", 0)),
         queue=int(getattr(card, "queue")) if hasattr(card, "queue") else None,
         card_type=int(getattr(card, "type")) if hasattr(card, "type") else None,
+        reading=reading,
     )
 
 
@@ -468,6 +481,8 @@ def find_payload_issue(payload: CardPayload) -> str | None:
     native = payload.native.strip()
     if not target:
         return "missing a Target field"
+    if payload.direction == PRODUCTION_DIRECTION and not native:
+        return "missing a Native field for a Production card"
 
     if normalize_surface_form(target) != normalize_surface_form(native):
         return None
@@ -531,6 +546,7 @@ def match_words_to_payloads(
             example=payload.example,
             surface_form=matched_surfaces[payload.card_id],
             card=payload.card,
+            reading=payload.reading,
         )
         for payload in payloads
         if payload.card_id in matched_surfaces
@@ -692,12 +708,17 @@ class SessionRunner:
         if missing:
             raise ValueError("All words in the round must be rated before commit.")
 
-        # Capture new cards (and their home decks) before answering, so we can
-        # credit Anki's daily new-card counter once the round commits.
+        # Capture card kinds (and their home decks) before answering, so we can
+        # credit Anki's daily new/review counters once the round commits.
         new_home_decks = [
             int(getattr(row.card, "odid", 0)) or int(getattr(row.card, "did", 0))
             for row in round_data.rows
             if int(getattr(row.card, "type", -1)) == 0
+        ]
+        review_home_decks = [
+            int(getattr(row.card, "odid", 0)) or int(getattr(row.card, "did", 0))
+            for row in round_data.rows
+            if int(getattr(row.card, "type", -1)) == 2
         ]
 
         undo_entry = None
@@ -731,13 +752,16 @@ class SessionRunner:
 
         self.reviewed_words += len(round_data.rows)
         self.completed_rounds += 1
-        self._credit_new_cards_studied(new_home_decks)
+        self._credit_cards_studied(new_home_decks, "newToday")
+        self._credit_cards_studied(review_home_decks, "revToday")
         self.answered_card_ids.update(row.card_id for row in round_data.rows)
 
-    def _credit_new_cards_studied(self, home_deck_ids: Sequence[int]) -> None:
-        """Tick Anki's daily new-card counter for each new card AllAI introduced.
-        The filtered-deck pile doesn't do this on its own, so without it the shown
-        new count never drops and the daily cap would reset every session."""
+    def _credit_cards_studied(self, home_deck_ids: Sequence[int], counter_key: str) -> None:
+        """Tick a deck's daily studied counter (newToday/revToday) for each card
+        AllAI answered. Answering inside the temporary filtered deck doesn't do
+        this on its own, so without it the deck's shown count never drops when
+        the backlog exceeds the daily limit, and the daily cap would reset every
+        session."""
         if not home_deck_ids:
             return
         try:
@@ -753,9 +777,9 @@ class SessionRunner:
                 deck = self.col.decks.get(deck_id)
                 if deck is None:
                     continue
-                new_today = deck.get("newToday") or [today, 0]
-                base = int(new_today[1]) if new_today[0] == today else 0
-                deck["newToday"] = [today, base + count]
+                studied_today = deck.get(counter_key) or [today, 0]
+                base = int(studied_today[1]) if studied_today[0] == today else 0
+                deck[counter_key] = [today, base + count]
                 self.col.decks.save(deck)
             except Exception:
                 continue

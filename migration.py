@@ -1,15 +1,30 @@
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 from typing import Any
 
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .note_type import ensure_langcard_notetype
-    from .session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, TARGET_FIELD
+    from .session import (
+        EXAMPLE_FIELD,
+        NATIVE_FIELD,
+        NOTE_TYPE_NAME,
+        READING_FIELD,
+        TARGET_FIELD,
+        contains_cjk,
+    )
 except ImportError:  # pragma: no cover
     from note_type import ensure_langcard_notetype
-    from session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, TARGET_FIELD
+    from session import (
+        EXAMPLE_FIELD,
+        NATIVE_FIELD,
+        NOTE_TYPE_NAME,
+        READING_FIELD,
+        TARGET_FIELD,
+        contains_cjk,
+    )
 
 try:
     from aqt.qt import (
@@ -36,6 +51,27 @@ MODE_COPY_SUSPEND = "copy_suspend"
 MODE_COPY_KEEP = "copy_keep"
 MODE_IN_PLACE = "in_place"
 _HTML_BREAK_RE = re.compile(r"(?i)<br\s*/?>")
+_ANCHOR_TAG_RE = re.compile(r"(?is)<a\b[^>]*>.*?</a>")
+_HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
+_CJK_SENTENCE_PUNCTUATION = "。！？；"
+# Back text like `汉字 (pīnyīn)` from decks where Front holds the English meaning.
+_TARGET_WITH_READING_RE = re.compile(r"^(?P<target>[^()（）]+?)\s*[（(](?P<reading>[^()（）]+)[)）]$")
+# Back text like `pīnyīn - meaning` where the reading was packed in front of the meaning.
+_READING_PREFIX_RE = re.compile(r"^(?P<reading>[^\W\d_][^-–]*?)\s*[-–]\s*(?P<native>.+)$", re.DOTALL)
+# Radical fronts like `氵- shuǐ` that pack the reading behind the character.
+_CJK_WITH_READING_SUFFIX_RE = re.compile(r"^(?P<target>\S+)\s*[-–]\s*(?P<reading>.+)$")
+_PINYIN_TONE_CHARS = "üāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜÜĀÁǍÀĒÉĚÈĪÍǏÌŌÓǑÒŪÚǓÙǕǗǙǛ"
+_PINYIN_SYLLABLE_RE = re.compile(
+    r"(?i)^(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])?[aeiouüv]{1,3}(?:n|ng|r)?$"
+)
+# `Snowflake; Example: I saw a snowflake.` — an example packed behind the main text.
+_EXAMPLE_SUFFIX_RE = re.compile(
+    r"(?i)^(?P<main>.+?)\s*[;；]\s*Example\s*[:：]\s*(?P<example>.+)$", re.DOTALL
+)
+# Grammar notes like `了 (le) as a sentence-final particle ...`: term, reading, explanation.
+_CJK_TERM_WITH_READING_RE = re.compile(
+    r"^(?P<target>[^\s()（）]+)\s*[（(](?P<reading>[^()（）]+)[)）]\s*(?P<native>.+)$", re.DOTALL
+)
 
 
 @dataclass
@@ -43,6 +79,7 @@ class ParsedPipeNote:
     target: str
     native: str
     example: str
+    reading: str = ""
 
 
 @dataclass
@@ -82,6 +119,125 @@ def parse_front_back_fields(front: str, back: str) -> ParsedPipeNote:
     return ParsedPipeNote(target=target, native=native, example=example)
 
 
+def _clean_html_text(text: str) -> str:
+    """Flatten a field fragment to plain text: drop links and markup, decode entities."""
+    without_anchors = _ANCHOR_TAG_RE.sub("", text)
+    without_breaks = _HTML_BREAK_RE.sub(" ", without_anchors)
+    plain = html.unescape(_HTML_TAG_RE.sub("", without_breaks))
+    return re.sub(r"\s+", " ", plain).strip()
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    return text.strip().strip("\"'“”").strip()
+
+
+def _split_mandarin_back(back: str) -> tuple[str, str]:
+    parts = [
+        _clean_html_text(part)
+        for part in _HTML_BREAK_RE.split(_ANCHOR_TAG_RE.sub("", back))
+    ]
+    parts = [part for part in parts if part]
+    if not parts:
+        return "", ""
+    return parts[0], " <br> ".join(parts[1:])
+
+
+def _split_example_suffix(text: str) -> tuple[str, str]:
+    match = _EXAMPLE_SUFFIX_RE.match(text)
+    if match is None:
+        return text.strip(), ""
+    return match.group("main").strip(), match.group("example").strip()
+
+
+def _looks_like_pinyin(text: str, allow_toneless: bool = False) -> bool:
+    stripped = text.strip()
+    if not stripped or contains_cjk(stripped):
+        return False
+    if any(char in _PINYIN_TONE_CHARS for char in stripped):
+        return True
+    # A toneless syllable like `men` could equally be English, so only trust it
+    # where the note format makes the reading position explicit.
+    return allow_toneless and _PINYIN_SYLLABLE_RE.match(stripped) is not None
+
+
+def parse_mandarin_front_back(front: str, back: str, hint: str = "") -> ParsedPipeNote:
+    front_text = _clean_html_text(front)
+    hint_text = _clean_html_text(hint)
+    if not front_text:
+        raise ValueError("Missing front/target text.")
+    if any(char in front_text for char in _CJK_SENTENCE_PUNCTUATION):
+        raise ValueError("Front is a full sentence, not a vocabulary word.")
+
+    if contains_cjk(front_text):
+        term_match = _CJK_TERM_WITH_READING_RE.match(front_text)
+        if (
+            term_match is not None
+            and contains_cjk(term_match.group("target"))
+            and not contains_cjk(term_match.group("reading"))
+        ):
+            # Grammar-style note: the front packs `term (reading) explanation`,
+            # and the whole back is example material.
+            first, rest = _split_mandarin_back(back)
+            example = " <br> ".join(part for part in (first, rest) if part)
+            return ParsedPipeNote(
+                target=term_match.group("target").strip(),
+                native=term_match.group("native").strip(),
+                example=example,
+                reading=term_match.group("reading").strip(),
+            )
+
+        target = front_text
+        suffix_match = _CJK_WITH_READING_SUFFIX_RE.match(front_text)
+        reading = hint_text
+        if (
+            suffix_match is not None
+            and contains_cjk(suffix_match.group("target"))
+            and _looks_like_pinyin(suffix_match.group("reading"), allow_toneless=True)
+        ):
+            # Radical-style front: `氵- shuǐ`.
+            target = suffix_match.group("target").strip()
+            reading = reading or suffix_match.group("reading").strip()
+
+        native, example = _split_mandarin_back(back)
+        if not reading:
+            match = _READING_PREFIX_RE.match(native)
+            if match and _looks_like_pinyin(match.group("reading"), allow_toneless=True):
+                reading = match.group("reading").strip()
+                native = match.group("native").strip()
+        if not reading and _looks_like_pinyin(native) and len(native.split()) <= 4:
+            # Radical cards sometimes carry only the pinyin on the back.
+            reading, native = native, ""
+        if not native and not reading:
+            raise ValueError("Missing back/native text.")
+        return ParsedPipeNote(target=target, native=native, example=example, reading=reading)
+
+    # Reversed layout: Front holds the meaning, Back holds `汉字 (pīnyīn)`.
+    front_main, front_example = _split_example_suffix(front_text)
+    target_line, back_rest = _split_mandarin_back(back)
+    target_main, target_example = _split_example_suffix(target_line)
+    match = _TARGET_WITH_READING_RE.match(_strip_wrapping_quotes(target_main))
+    if match:
+        target = match.group("target").strip()
+        reading = match.group("reading").strip()
+    else:
+        target, reading = _strip_wrapping_quotes(target_main), hint_text
+    if not target:
+        raise ValueError("Missing target text.")
+    example_parts = []
+    if target_example:
+        example_parts.append(
+            f'{target_example} – "{front_example}"' if front_example else target_example
+        )
+    if back_rest:
+        example_parts.append(back_rest)
+    return ParsedPipeNote(
+        target=target,
+        native=_strip_wrapping_quotes(front_main),
+        example=" <br> ".join(example_parts),
+        reading=reading,
+    )
+
+
 def detect_migration_source(note_or_notetype: Any) -> MigrationSource:
     field_names = list(_field_names(note_or_notetype))
     if "Front" in field_names and "Back" in field_names:
@@ -103,12 +259,18 @@ def detect_migration_source(note_or_notetype: Any) -> MigrationSource:
 def extract_langcard_data(note: Any) -> ParsedPipeNote:
     source = detect_migration_source(note)
     if source.kind == "front_back":
-        return parse_front_back_fields(note["Front"], note["Back"])
+        front = note["Front"]
+        back = note["Back"]
+        hint = note["Hint"] if "Hint" in note else ""
+        if any(contains_cjk(str(value)) for value in (front, back, hint)):
+            return parse_mandarin_front_back(front, back, hint)
+        return parse_front_back_fields(front, back)
     if source.kind == "langcard_fields":
         return ParsedPipeNote(
             target=note[TARGET_FIELD].strip(),
             native=note[NATIVE_FIELD].strip(),
             example=note[EXAMPLE_FIELD].strip(),
+            reading=note[READING_FIELD].strip() if READING_FIELD in note else "",
         )
     if source.kind == "packed_field":
         field_name = source.detail.removeprefix("Packed field: ").strip()
@@ -223,6 +385,8 @@ def migrate_notes(
                 note[TARGET_FIELD] = parsed.target
                 note[NATIVE_FIELD] = parsed.native
                 note[EXAMPLE_FIELD] = parsed.example
+                if READING_FIELD in note:
+                    note[READING_FIELD] = parsed.reading
                 note.add_tag(MIGRATION_TAG)
                 mw.col.update_note(note)
             else:
@@ -258,6 +422,8 @@ def _copy_note_to_langcard(
     new_note[TARGET_FIELD] = parsed.target
     new_note[NATIVE_FIELD] = parsed.native
     new_note[EXAMPLE_FIELD] = parsed.example
+    if READING_FIELD in new_note:
+        new_note[READING_FIELD] = parsed.reading
     new_note.add_tag("allai:langcard")
     mw.col.add_note(new_note, destination_deck_id)
     _copy_scheduling(source_note.cards(), new_note.cards(), mw.col)

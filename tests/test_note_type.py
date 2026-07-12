@@ -50,11 +50,17 @@ class NoteTypeTests(unittest.TestCase):
         col = FakeCollection()
         notetype = ensure_langcard_notetype(col)
         self.assertTrue(col.models.added)
-        self.assertEqual([field["name"] for field in notetype["flds"]], ["Target", "Native", "Example"])
+        self.assertEqual(
+            [field["name"] for field in notetype["flds"]],
+            ["Target", "Native", "Example", "Reading"],
+        )
         self.assertEqual([template["name"] for template in notetype["tmpls"]], ["Recognition", "Production"])
-        self.assertEqual(notetype["tmpls"][0]["qfmt"], "{{Target}}")
-        self.assertEqual(notetype["tmpls"][1]["qfmt"], "{{Native}}")
+        self.assertEqual(notetype["tmpls"][0]["qfmt"], "{{Target}}<br>{{hint:Reading}}")
+        self.assertEqual(notetype["tmpls"][1]["qfmt"], "{{Native}}<br>{{hint:Reading}}")
         self.assertIn("{{Target}}", notetype["tmpls"][1]["afmt"])
+        self.assertIn("{{#Reading}}{{Reading}}<br>{{/Reading}}", notetype["tmpls"][0]["afmt"])
+        self.assertIn("strokeorder.com/chinese/{{text:Target}}", notetype["tmpls"][0]["afmt"])
+        self.assertIn("mdbg.net/chinese/dictionary?wdqb={{text:Target}}", notetype["tmpls"][1]["afmt"])
 
     def test_ensure_langcard_notetype_adds_production_to_existing_one_way_type(self) -> None:
         existing = {
@@ -67,8 +73,12 @@ class NoteTypeTests(unittest.TestCase):
         notetype = ensure_langcard_notetype(col)
         self.assertTrue(col.models.saved)
         self.assertEqual([template["name"] for template in notetype["tmpls"]], ["Recognition", "Production"])
-        self.assertEqual(notetype["tmpls"][1]["qfmt"], "{{Native}}")
+        self.assertEqual(notetype["tmpls"][1]["qfmt"], "{{Native}}<br>{{hint:Reading}}")
         self.assertIn("{{Target}}", notetype["tmpls"][1]["afmt"])
+        self.assertEqual(
+            [field["name"] for field in notetype["flds"]],
+            ["Target", "Native", "Example", "Reading"],
+        )
 
 
 if __name__ == "__main__":

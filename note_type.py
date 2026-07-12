@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
-    from .session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, TARGET_FIELD
+    from .session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, READING_FIELD, TARGET_FIELD
 except ImportError:  # pragma: no cover
-    from session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, TARGET_FIELD
+    from session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, READING_FIELD, TARGET_FIELD
 
 NOTE_TYPE_CSS = """
 .card {
@@ -17,23 +17,34 @@ NOTE_TYPE_CSS = """
 }
 """.strip()
 
+FIELD_NAMES = (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD, READING_FIELD)
+
+READING_HINT = "{{hint:" + READING_FIELD + "}}"
+# Order/Audio links are derived from Target, so they live in the template instead
+# of note fields. Reading doubles as the "this is a Chinese note" marker.
+REFERENCE_LINKS = (
+    "{{#" + READING_FIELD + "}}<br>"
+    '<a href="https://www.strokeorder.com/chinese/{{text:' + TARGET_FIELD + '}}">Order</a> '
+    '<a href="https://www.mdbg.net/chinese/dictionary?wdqb={{text:' + TARGET_FIELD + '}}">Audio</a>'
+    "{{/" + READING_FIELD + "}}"
+)
+
 RECOGNITION_TEMPLATE_NAME = "Recognition"
-RECOGNITION_QUESTION_FORMAT = "{{" + TARGET_FIELD + "}}"
+RECOGNITION_QUESTION_FORMAT = "{{" + TARGET_FIELD + "}}<br>" + READING_HINT
 RECOGNITION_ANSWER_FORMAT = (
-    "{{FrontSide}}<hr id=answer>{{"
-    + NATIVE_FIELD
-    + "}}<br>{{"
-    + EXAMPLE_FIELD
-    + "}}"
+    "{{FrontSide}}<hr id=answer>"
+    + "{{#" + READING_FIELD + "}}{{" + READING_FIELD + "}}<br>{{/" + READING_FIELD + "}}"
+    + "{{" + NATIVE_FIELD + "}}<br>{{" + EXAMPLE_FIELD + "}}"
+    + REFERENCE_LINKS
 )
 PRODUCTION_TEMPLATE_NAME = "Production"
-PRODUCTION_QUESTION_FORMAT = "{{" + NATIVE_FIELD + "}}"
+PRODUCTION_QUESTION_FORMAT = "{{" + NATIVE_FIELD + "}}<br>" + READING_HINT
 PRODUCTION_ANSWER_FORMAT = (
     "{{FrontSide}}<hr id=answer>{{"
     + TARGET_FIELD
-    + "}}<br>{{"
-    + EXAMPLE_FIELD
-    + "}}"
+    + "}}{{#" + READING_FIELD + "}} ({{" + READING_FIELD + "}}){{/" + READING_FIELD + "}}"
+    + "<br>{{" + EXAMPLE_FIELD + "}}"
+    + REFERENCE_LINKS
 )
 
 TEMPLATES = {
@@ -68,7 +79,7 @@ def _create_langcard_notetype(col: Any) -> dict[str, Any]:
     notetype["id"] = 0
     notetype["flds"] = []
     notetype["tmpls"] = []
-    for field_name in (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD):
+    for field_name in FIELD_NAMES:
         col.models.add_field(notetype, col.models.new_field(field_name))
     for template_name, formats in TEMPLATES.items():
         template = col.models.new_template(template_name)
@@ -84,7 +95,7 @@ def _create_langcard_notetype(col: Any) -> dict[str, Any]:
 def _ensure_fields(col: Any, notetype: dict[str, Any]) -> bool:
     field_names = {field["name"] for field in notetype["flds"]}
     updated = False
-    for field_name in (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD):
+    for field_name in FIELD_NAMES:
         if field_name in field_names:
             continue
         col.models.add_field(notetype, col.models.new_field(field_name))

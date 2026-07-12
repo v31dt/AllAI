@@ -41,6 +41,7 @@ class FakeCard:
         ord: int = 0,
         queue: int = 0,
         card_type: int = 0,
+        reading: str = "",
     ) -> None:
         self.id = card_id
         self.nid = note_id if note_id is not None else card_id
@@ -48,7 +49,7 @@ class FakeCard:
         self.queue = queue
         self.type = card_type
         self.due = due
-        self._note = FakeNote(Target=target, Native=native, Example=example)
+        self._note = FakeNote(Target=target, Native=native, Example=example, Reading=reading)
         self.started = False
 
     def note(self) -> FakeNote:
@@ -272,6 +273,54 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(payload.direction, PRODUCTION_DIRECTION)
         self.assertEqual(payload.prompt_text, "doctor")
         self.assertEqual(payload.answer_text, "dokter")
+
+    def test_credit_cards_studied_ticks_and_resets_daily_counters(self) -> None:
+        deck = {"id": 7, "newToday": [5, 1], "revToday": [4, 9]}
+        col = SimpleNamespace(
+            sched=SimpleNamespace(today=5),
+            decks=SimpleNamespace(
+                get=lambda deck_id: deck if deck_id == 7 else None,
+                save=lambda _deck: None,
+            ),
+        )
+        runner = SessionRunner(col, {"decks": ["Deck"]}, FakeLLM([]))
+        runner._credit_cards_studied([7, 7], "newToday")
+        runner._credit_cards_studied([7], "revToday")
+        self.assertEqual(deck["newToday"], [5, 3])
+        # revToday was from an older day, so it resets before counting.
+        self.assertEqual(deck["revToday"], [5, 1])
+
+    def test_build_card_payload_includes_reading_in_recognition_answer(self) -> None:
+        payload = build_card_payload(FakeCard(1, "机场", "airport", reading="jīchǎng"))
+        self.assertEqual(payload.prompt_text, "机场")
+        self.assertEqual(payload.answer_text, "jīchǎng — airport")
+        self.assertEqual(payload.reading, "jīchǎng")
+
+    def test_build_card_payload_includes_reading_in_production_answer(self) -> None:
+        payload = build_card_payload(
+            FakeCard(1, "机场", "airport", ord=1, reading="jīchǎng"), PRODUCTION_DIRECTION
+        )
+        self.assertEqual(payload.prompt_text, "airport")
+        self.assertEqual(payload.answer_text, "机场 (jīchǎng)")
+
+    def test_build_card_payload_tolerates_notes_without_reading_field(self) -> None:
+        card = FakeCard(1, "dokter", "doctor")
+        del card._note["Reading"]
+        payload = build_card_payload(card)
+        self.assertEqual(payload.answer_text, "doctor")
+        self.assertEqual(payload.reading, "")
+
+    def test_match_words_to_payloads_threads_reading_into_rows(self) -> None:
+        payloads = [build_card_payload(FakeCard(1, "机场", "airport", reading="jīchǎng"))]
+        _, words_used = parse_generation_payload(
+            {
+                "sentence": "我们去机场。",
+                "words_used": [{"target": "机场", "surface": "机场"}],
+            }
+        )
+        rows, unmatched = match_words_to_payloads(payloads, words_used)
+        self.assertEqual([row.reading for row in rows], ["jīchǎng"])
+        self.assertEqual(unmatched, [])
 
     def test_match_words_to_payloads_uses_exact_casefold_and_punctuation_matching(self) -> None:
         payloads = [
