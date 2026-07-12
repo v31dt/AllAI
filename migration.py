@@ -9,6 +9,7 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .note_type import ensure_langcard_notetype
     from .session import (
         EXAMPLE_FIELD,
+        EXTRA_FIELD,
         NATIVE_FIELD,
         NOTE_TYPE_NAME,
         READING_FIELD,
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover
     from note_type import ensure_langcard_notetype
     from session import (
         EXAMPLE_FIELD,
+        EXTRA_FIELD,
         NATIVE_FIELD,
         NOTE_TYPE_NAME,
         READING_FIELD,
@@ -46,7 +48,6 @@ except ImportError:  # pragma: no cover - allows parser tests
     showInfo = None
     showWarning = None
 
-MIGRATION_TAG = "allai:migrated"
 MODE_COPY_SUSPEND = "copy_suspend"
 MODE_COPY_KEEP = "copy_keep"
 MODE_IN_PLACE = "in_place"
@@ -80,6 +81,7 @@ class ParsedPipeNote:
     native: str
     example: str
     reading: str = ""
+    extra: str = ""
 
 
 @dataclass
@@ -163,6 +165,9 @@ def _looks_like_pinyin(text: str, allow_toneless: bool = False) -> bool:
 def parse_mandarin_front_back(front: str, back: str, hint: str = "") -> ParsedPipeNote:
     front_text = _clean_html_text(front)
     hint_text = _clean_html_text(hint)
+    # Reference links (Order/Audio etc.) are kept verbatim in Extra instead of
+    # being interpreted; the card template renders them as-is.
+    extra = " ".join(_ANCHOR_TAG_RE.findall(front) + _ANCHOR_TAG_RE.findall(back))
     if not front_text:
         raise ValueError("Missing front/target text.")
     if any(char in front_text for char in _CJK_SENTENCE_PUNCTUATION):
@@ -184,6 +189,7 @@ def parse_mandarin_front_back(front: str, back: str, hint: str = "") -> ParsedPi
                 native=term_match.group("native").strip(),
                 example=example,
                 reading=term_match.group("reading").strip(),
+                extra=extra,
             )
 
         target = front_text
@@ -209,7 +215,9 @@ def parse_mandarin_front_back(front: str, back: str, hint: str = "") -> ParsedPi
             reading, native = native, ""
         if not native and not reading:
             raise ValueError("Missing back/native text.")
-        return ParsedPipeNote(target=target, native=native, example=example, reading=reading)
+        return ParsedPipeNote(
+            target=target, native=native, example=example, reading=reading, extra=extra
+        )
 
     # Reversed layout: Front holds the meaning, Back holds `汉字 (pīnyīn)`.
     front_main, front_example = _split_example_suffix(front_text)
@@ -235,6 +243,7 @@ def parse_mandarin_front_back(front: str, back: str, hint: str = "") -> ParsedPi
         native=_strip_wrapping_quotes(front_main),
         example=" <br> ".join(example_parts),
         reading=reading,
+        extra=extra,
     )
 
 
@@ -271,6 +280,7 @@ def extract_langcard_data(note: Any) -> ParsedPipeNote:
             native=note[NATIVE_FIELD].strip(),
             example=note[EXAMPLE_FIELD].strip(),
             reading=note[READING_FIELD].strip() if READING_FIELD in note else "",
+            extra=note[EXTRA_FIELD].strip() if EXTRA_FIELD in note else "",
         )
     if source.kind == "packed_field":
         field_name = source.detail.removeprefix("Packed field: ").strip()
@@ -368,9 +378,6 @@ def migrate_notes(
 
     for note_id in note_ids:
         note = mw.col.get_note(note_id)
-        if note.has_tag(MIGRATION_TAG):
-            result.skipped += 1
-            continue
         try:
             parsed = extract_langcard_data(note)
         except ValueError:
@@ -387,7 +394,8 @@ def migrate_notes(
                 note[EXAMPLE_FIELD] = parsed.example
                 if READING_FIELD in note:
                     note[READING_FIELD] = parsed.reading
-                note.add_tag(MIGRATION_TAG)
+                if EXTRA_FIELD in note:
+                    note[EXTRA_FIELD] = parsed.extra
                 mw.col.update_note(note)
             else:
                 _copy_note_to_langcard(
@@ -424,18 +432,21 @@ def _copy_note_to_langcard(
     new_note[EXAMPLE_FIELD] = parsed.example
     if READING_FIELD in new_note:
         new_note[READING_FIELD] = parsed.reading
+    if EXTRA_FIELD in new_note:
+        new_note[EXTRA_FIELD] = parsed.extra
     new_note.add_tag("allai:langcard")
     mw.col.add_note(new_note, destination_deck_id)
     _copy_scheduling(source_note.cards(), new_note.cards(), mw.col)
-
-    source_note.add_tag(MIGRATION_TAG)
-    mw.col.update_note(source_note)
     mw.col.update_note(new_note)
 
     if suspend_originals:
         source_card_ids = [int(card.id) for card in source_note.cards()]
         if source_card_ids:
             mw.col.sched.suspend_cards(source_card_ids)
+
+
+# Card type -> the queue an unsuspended card of that type sits in.
+_ACTIVE_QUEUE_FOR_TYPE = {0: 0, 1: 1, 2: 2, 3: 1}
 
 
 def _copy_scheduling(source_cards: list[Any], destination_cards: list[Any], col: Any) -> None:
@@ -458,6 +469,12 @@ def _copy_scheduling(source_cards: list[Any], destination_cards: list[Any], col:
             "last_review_time",
         ):
             setattr(destination_card, attribute, getattr(source_card, attribute, getattr(destination_card, attribute, None)))
+        # A suspended source (e.g. from an earlier copy+suspend run) should still
+        # produce an active copy, so restore the queue from the card type.
+        if getattr(destination_card, "queue", None) == -1:
+            destination_card.queue = _ACTIVE_QUEUE_FOR_TYPE.get(
+                int(getattr(destination_card, "type", 0)), 0
+            )
         col.update_card(destination_card)
 
 

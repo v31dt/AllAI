@@ -17,9 +17,7 @@ from migration import (
 
 
 class FakeNote(dict):
-    def has_tag(self, tag: str) -> bool:
-        tags = self.get("tags", "")
-        return tag in tags.split()
+    pass
 
 
 class FakeCard:
@@ -111,6 +109,11 @@ class MigrationParserTests(unittest.TestCase):
         self.assertEqual(parsed.native, "airport")
         self.assertEqual(parsed.example, "我们去机场接他。- We’re going to the airport to pick him up.")
         self.assertEqual(parsed.reading, "jīchǎng")
+        self.assertEqual(
+            parsed.extra,
+            '<a href="https://www.strokeorder.com/chinese/机场">Order</a> '
+            '<a href="https://www.mdbg.net/chinese/dictionary?wdqb=机场">Audio</a>',
+        )
 
     def test_parse_mandarin_note_without_example(self) -> None:
         parsed = parse_mandarin_front_back(
@@ -141,6 +144,7 @@ class MigrationParserTests(unittest.TestCase):
         self.assertEqual(parsed.target, "明天")
         self.assertEqual(parsed.native, "tomorrow")
         self.assertEqual(parsed.reading, "míngtiān")
+        self.assertEqual(parsed.extra, "")
 
     def test_parse_mandarin_reversed_note_with_quotes(self) -> None:
         parsed = parse_mandarin_front_back('"I, me"', '"我 (wǒ)"', "")

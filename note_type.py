@@ -3,9 +3,23 @@ from __future__ import annotations
 from typing import Any
 
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
-    from .session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, READING_FIELD, TARGET_FIELD
+    from .session import (
+        EXAMPLE_FIELD,
+        EXTRA_FIELD,
+        NATIVE_FIELD,
+        NOTE_TYPE_NAME,
+        READING_FIELD,
+        TARGET_FIELD,
+    )
 except ImportError:  # pragma: no cover
-    from session import EXAMPLE_FIELD, NATIVE_FIELD, NOTE_TYPE_NAME, READING_FIELD, TARGET_FIELD
+    from session import (
+        EXAMPLE_FIELD,
+        EXTRA_FIELD,
+        NATIVE_FIELD,
+        NOTE_TYPE_NAME,
+        READING_FIELD,
+        TARGET_FIELD,
+    )
 
 NOTE_TYPE_CSS = """
 .card {
@@ -17,16 +31,13 @@ NOTE_TYPE_CSS = """
 }
 """.strip()
 
-FIELD_NAMES = (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD, READING_FIELD)
+FIELD_NAMES = (TARGET_FIELD, NATIVE_FIELD, EXAMPLE_FIELD, READING_FIELD, EXTRA_FIELD)
 
 READING_HINT = "{{hint:" + READING_FIELD + "}}"
-# Order/Audio links are derived from Target, so they live in the template instead
-# of note fields. Reading doubles as the "this is a Chinese note" marker.
-REFERENCE_LINKS = (
-    "{{#" + READING_FIELD + "}}<br>"
-    '<a href="https://www.strokeorder.com/chinese/{{text:' + TARGET_FIELD + '}}">Order</a> '
-    '<a href="https://www.mdbg.net/chinese/dictionary?wdqb={{text:' + TARGET_FIELD + '}}">Audio</a>'
-    "{{/" + READING_FIELD + "}}"
+# Extra is an opaque per-note slot (reference links, images, anything) rendered
+# as-is on answer sides; the addon never interprets its contents.
+EXTRA_BLOCK = (
+    "{{#" + EXTRA_FIELD + "}}<br>{{" + EXTRA_FIELD + "}}{{/" + EXTRA_FIELD + "}}"
 )
 
 RECOGNITION_TEMPLATE_NAME = "Recognition"
@@ -35,7 +46,7 @@ RECOGNITION_ANSWER_FORMAT = (
     "{{FrontSide}}<hr id=answer>"
     + "{{#" + READING_FIELD + "}}{{" + READING_FIELD + "}}<br>{{/" + READING_FIELD + "}}"
     + "{{" + NATIVE_FIELD + "}}<br>{{" + EXAMPLE_FIELD + "}}"
-    + REFERENCE_LINKS
+    + EXTRA_BLOCK
 )
 PRODUCTION_TEMPLATE_NAME = "Production"
 PRODUCTION_QUESTION_FORMAT = "{{" + NATIVE_FIELD + "}}<br>" + READING_HINT
@@ -44,7 +55,7 @@ PRODUCTION_ANSWER_FORMAT = (
     + TARGET_FIELD
     + "}}{{#" + READING_FIELD + "}} ({{" + READING_FIELD + "}}){{/" + READING_FIELD + "}}"
     + "<br>{{" + EXAMPLE_FIELD + "}}"
-    + REFERENCE_LINKS
+    + EXTRA_BLOCK
 )
 
 TEMPLATES = {

@@ -52,15 +52,15 @@ class NoteTypeTests(unittest.TestCase):
         self.assertTrue(col.models.added)
         self.assertEqual(
             [field["name"] for field in notetype["flds"]],
-            ["Target", "Native", "Example", "Reading"],
+            ["Target", "Native", "Example", "Reading", "Extra"],
         )
         self.assertEqual([template["name"] for template in notetype["tmpls"]], ["Recognition", "Production"])
         self.assertEqual(notetype["tmpls"][0]["qfmt"], "{{Target}}<br>{{hint:Reading}}")
         self.assertEqual(notetype["tmpls"][1]["qfmt"], "{{Native}}<br>{{hint:Reading}}")
         self.assertIn("{{Target}}", notetype["tmpls"][1]["afmt"])
         self.assertIn("{{#Reading}}{{Reading}}<br>{{/Reading}}", notetype["tmpls"][0]["afmt"])
-        self.assertIn("strokeorder.com/chinese/{{text:Target}}", notetype["tmpls"][0]["afmt"])
-        self.assertIn("mdbg.net/chinese/dictionary?wdqb={{text:Target}}", notetype["tmpls"][1]["afmt"])
+        self.assertIn("{{#Extra}}<br>{{Extra}}{{/Extra}}", notetype["tmpls"][0]["afmt"])
+        self.assertIn("{{#Extra}}<br>{{Extra}}{{/Extra}}", notetype["tmpls"][1]["afmt"])
 
     def test_ensure_langcard_notetype_adds_production_to_existing_one_way_type(self) -> None:
         existing = {
@@ -77,7 +77,7 @@ class NoteTypeTests(unittest.TestCase):
         self.assertIn("{{Target}}", notetype["tmpls"][1]["afmt"])
         self.assertEqual(
             [field["name"] for field in notetype["flds"]],
-            ["Target", "Native", "Example", "Reading"],
+            ["Target", "Native", "Example", "Reading", "Extra"],
         )
 
 

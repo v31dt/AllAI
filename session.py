@@ -17,6 +17,7 @@ TARGET_FIELD = "Target"
 NATIVE_FIELD = "Native"
 EXAMPLE_FIELD = "Example"
 READING_FIELD = "Reading"
+EXTRA_FIELD = "Extra"
 
 EASE = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 
