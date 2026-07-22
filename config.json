@@ -8,6 +8,9 @@
   "session": {
     "words_per_sentence": 4,
     "include_new_cards": true,
+    "max_new_words_per_round": 2,
+    "round_log_enabled": true,
+    "round_log_max_entries": 50,
     "due_only": false,
     "card_mode": "both",
     "cefr_level": "b1",

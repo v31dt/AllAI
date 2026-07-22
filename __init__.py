@@ -13,11 +13,11 @@ except ImportError:  # pragma: no cover - allows pure-Python tests
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .migration import MigrationDialog
     from .note_type import ensure_langcard_notetype
-    from .session_dialog import SessionDialog, SessionLaunchDialog
+    from .session_dialog import SessionDialog, SessionLaunchDialog, SettingsDialog
 except ImportError:  # pragma: no cover
     from migration import MigrationDialog
     from note_type import ensure_langcard_notetype
-    from session_dialog import SessionDialog, SessionLaunchDialog
+    from session_dialog import SessionDialog, SessionLaunchDialog, SettingsDialog
 
 MENU_TITLE = "AllAI"
 
@@ -39,6 +39,13 @@ def _show_migration_dialog() -> None:
     dialog.exec()
 
 
+def _show_settings_dialog() -> None:
+    if mw is None:
+        return
+    dialog = SettingsDialog(mw)
+    dialog.exec()
+
+
 def _register_menu() -> None:
     if mw is None or getattr(mw, "form", None) is None:
         return
@@ -50,10 +57,13 @@ def _register_menu() -> None:
     menu = QMenu(MENU_TITLE, mw)
     start_action = QAction("Start session", mw)
     migrate_action = QAction("Migrate notes", mw)
+    settings_action = QAction("Settings", mw)
     qconnect(start_action.triggered, _show_session_dialog)
     qconnect(migrate_action.triggered, _show_migration_dialog)
+    qconnect(settings_action.triggered, _show_settings_dialog)
     menu.addAction(start_action)
     menu.addAction(migrate_action)
+    menu.addAction(settings_action)
     mw.form.menuTools.addMenu(menu)
     mw._allai_menu = menu
 

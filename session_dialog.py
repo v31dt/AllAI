@@ -12,6 +12,7 @@ from aqt.qt import (
     QHBoxLayout,
     QKeySequence,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QShortcut,
@@ -108,6 +109,47 @@ def choose_next_active_row_index(row_widgets: list[Any], current_index: int | No
             return index
 
     return None
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, mw: Any) -> None:
+        super().__init__(mw)
+        self.mw = mw
+        self.config = self._load_config()
+        self.api_key_input = QLineEdit()
+        self.setWindowTitle("AllAI Settings")
+        self.resize(520, 140)
+        self._build_ui()
+
+    def _load_config(self) -> dict[str, Any]:
+        current = self.mw.addonManager.getConfig(__name__) or {}
+        return deep_merge_config(DEFAULT_CONFIG, current)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        intro = QLabel("Configure the OpenAI-compatible API key used for AllAI sessions.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_input.setPlaceholderText("sk-...")
+        self.api_key_input.setText(str(self.config.get("llm", {}).get("api_key", "") or ""))
+        form.addRow("API key", self.api_key_input)
+        layout.addLayout(form)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def accept(self) -> None:
+        raw = self.mw.addonManager.getConfig(__name__) or {}
+        llm = raw.setdefault("llm", {})
+        llm["api_key"] = self.api_key_input.text().strip()
+        self.mw.addonManager.writeConfig(__name__, raw)
+        super().accept()
 
 
 class SessionLaunchDialog(QDialog):

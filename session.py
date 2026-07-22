@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 NOTE_TYPE_NAME = "LangCard"
@@ -22,6 +25,7 @@ EXTRA_FIELD = "Extra"
 EASE = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 
 DEFAULT_CEFR_LEVEL = "b1"
+DEFAULT_ROUND_LOG_FILENAME = "allai_rounds.jsonl"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
@@ -33,6 +37,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "session": {
         "words_per_sentence": 4,
         "include_new_cards": True,
+        "max_new_words_per_round": 2,
+        "round_log_enabled": True,
+        "round_log_max_entries": 50,
         "due_only": False,
         "card_mode": CARD_MODE_BOTH,
         "cefr_level": DEFAULT_CEFR_LEVEL,
@@ -600,6 +607,53 @@ def parse_generation_payload(payload: dict[str, Any]) -> tuple[str, list[WordUsa
     return sentence.strip(), usages
 
 
+def _default_round_log_path() -> Path:
+    return Path(__file__).resolve().with_name(DEFAULT_ROUND_LOG_FILENAME)
+
+
+def _resolve_round_log_path(config: dict[str, Any]) -> Path:
+    value = str(config["session"].get("round_log_path", "") or "").strip()
+    if not value:
+        return _default_round_log_path()
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parent / path
+
+
+def _card_stage(card: Any) -> str:
+    try:
+        card_type = int(getattr(card, "type", -1))
+    except Exception:
+        return "unknown"
+    if card_type == 0:
+        return "new"
+    if card_type == 1:
+        return "learning"
+    if card_type == 2:
+        return "review"
+    if card_type == 3:
+        return "relearning"
+    return "unknown"
+
+
+def _append_round_log(path: Path, entry: dict[str, Any], max_entries: int) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        if path.exists():
+            lines = [line.rstrip("\n") for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines.append(json.dumps(entry, ensure_ascii=False))
+        if max_entries > 0 and len(lines) > max_entries:
+            lines = lines[-max_entries:]
+        payload = "\n".join(lines)
+        if payload:
+            payload += "\n"
+        path.write_text(payload, encoding="utf-8")
+    except Exception:
+        return
+
+
 class SessionRunner:
     def __init__(self, col: Any, config: dict[str, Any], llm_client: SentenceGenerator) -> None:
         self.col = col
@@ -618,6 +672,21 @@ class SessionRunner:
         self.answered_card_ids: set[int] = set()
         self.skipped_card_ids: set[int] = set()
         self._messages: list[str] = []
+
+    def max_new_words_per_round(self) -> int:
+        try:
+            return max(0, int(self.config["session"].get("max_new_words_per_round", 2)))
+        except Exception:
+            return 2
+
+    def round_log_enabled(self) -> bool:
+        return bool(self.config["session"].get("round_log_enabled", True))
+
+    def round_log_max_entries(self) -> int:
+        try:
+            return max(1, int(self.config["session"].get("round_log_max_entries", 50)))
+        except Exception:
+            return 50
 
     def excluded_card_ids(self) -> set[int]:
         """Cards that must not be offered again this session: already answered,
@@ -756,6 +825,7 @@ class SessionRunner:
         self._credit_cards_studied(new_home_decks, "newToday")
         self._credit_cards_studied(review_home_decks, "revToday")
         self.answered_card_ids.update(row.card_id for row in round_data.rows)
+        self._persist_round_log(round_data, ratings)
 
     def _credit_cards_studied(self, home_deck_ids: Sequence[int], counter_key: str) -> None:
         """Tick a deck's daily studied counter (newToday/revToday) for each card
@@ -822,11 +892,17 @@ class SessionRunner:
         queued = self.col.sched.get_queued_cards(fetch_limit=batch_size)
         cards: list[Any] = []
         excluded = self.excluded_card_ids()
+        new_cards = 0
+        max_new_cards = self.max_new_words_per_round()
         for queued_card in queued.cards:
             card_id = int(queued_card.card.id)
             if card_id in excluded:
                 continue
             card = self.col.get_card(card_id)
+            if _is_new_card(card):
+                if new_cards >= max_new_cards:
+                    break
+                new_cards += 1
             if hasattr(card, "start_timer"):
                 card.start_timer()
             cards.append(card)
@@ -880,6 +956,57 @@ class SessionRunner:
         )
         return None
 
+    def _persist_round_log(self, round_data: RoundData, ratings: dict[int, str]) -> None:
+        if not self.round_log_enabled():
+            return
+
+        rating_counts = {name: 0 for name in EASE}
+        rows: list[dict[str, Any]] = []
+        for row in round_data.rows:
+            rating = ratings.get(row.card_id, "")
+            if rating in rating_counts:
+                rating_counts[rating] += 1
+            card = row.card
+            rows.append(
+                {
+                    "card_id": row.card_id,
+                    "note_id": int(getattr(card, "nid", 0)),
+                    "target": row.target,
+                    "native": row.native,
+                    "prompt_text": row.prompt_text,
+                    "answer_text": row.answer_text,
+                    "surface_form": row.surface_form,
+                    "reading": row.reading,
+                    "rating": rating,
+                    "stage_before": _card_stage(card),
+                    "card_type_before": int(getattr(card, "type", -1)),
+                    "queue_before": int(getattr(card, "queue", -1)),
+                    "due_before": int(getattr(card, "due", 0)),
+                    "card_ord": int(getattr(card, "ord", -1)),
+                    "home_deck_id": int(getattr(card, "odid", 0)) or int(getattr(card, "did", 0)),
+                }
+            )
+
+        entry = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "round_index": round_data.round_index,
+            "reviewed_words_before_round": round_data.reviewed_words_before_round,
+            "direction": round_data.direction,
+            "direction_label": round_data.direction_label,
+            "decks": [deck for deck in self.config.get("decks", []) if str(deck).strip()],
+            "sentence": round_data.sentence,
+            "stats": {
+                "word_count": len(round_data.rows),
+                "new_cards": sum(1 for row in rows if row["stage_before"] == "new"),
+                "learning_cards": sum(1 for row in rows if row["stage_before"] == "learning"),
+                "review_cards": sum(1 for row in rows if row["stage_before"] == "review"),
+                "relearning_cards": sum(1 for row in rows if row["stage_before"] == "relearning"),
+                "ratings": rating_counts,
+            },
+            "rows": rows,
+        }
+        _append_round_log(_resolve_round_log_path(self.config), entry, self.round_log_max_entries())
+
 
 def _highlight_targets_for_rows(rows: Sequence[RoundRow]) -> list[str]:
     targets: list[str] = []
@@ -901,3 +1028,10 @@ def _schedulable_prefix_rows(
             break
         prefix.append(row)
     return prefix
+
+
+def _is_new_card(card: Any) -> bool:
+    try:
+        return int(getattr(card, "type", -1)) == 0
+    except Exception:
+        return False

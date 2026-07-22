@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -40,7 +43,7 @@ class FakeCard:
         note_id: int | None = None,
         ord: int = 0,
         queue: int = 0,
-        card_type: int = 0,
+        card_type: int = 2,
         reading: str = "",
     ) -> None:
         self.id = card_id
@@ -234,6 +237,114 @@ class SessionTests(unittest.TestCase):
             FakeLLM([]),
         )
         self.assertTrue(runner.include_new_cards)
+
+    def test_select_batch_limits_new_words_per_round(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection(
+            [
+                FakeCard(1, "dokter", "doctor", card_type=0),
+                FakeCard(2, "fiets", "bike", card_type=0),
+                FakeCard(3, "huis", "house", card_type=0),
+                FakeCard(4, "boek", "book", card_type=0),
+            ],
+            log,
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, FakeLLM([]))
+        self.assertEqual([card.id for card in runner._select_batch()], [1, 2])
+
+    def test_select_batch_keeps_due_cards_and_allows_two_new_cards(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection(
+            [
+                FakeCard(1, "dokter", "doctor", card_type=2),
+                FakeCard(2, "afspraak", "appointment", card_type=2),
+                FakeCard(3, "fiets", "bike", card_type=0),
+                FakeCard(4, "boek", "book", card_type=0),
+            ],
+            log,
+        )
+        runner = SessionRunner(col, {"decks": ["Dutch"]}, FakeLLM([]))
+        self.assertEqual([card.id for card in runner._select_batch()], [1, 2, 3, 4])
+
+    def test_select_batch_honors_configured_new_word_cap(self) -> None:
+        log: list[tuple[str, int | str]] = []
+        col = FakeCollection(
+            [
+                FakeCard(1, "dokter", "doctor", card_type=0),
+                FakeCard(2, "fiets", "bike", card_type=0),
+                FakeCard(3, "huis", "house", card_type=0),
+            ],
+            log,
+        )
+        runner = SessionRunner(
+            col,
+            {"decks": ["Dutch"], "session": {"max_new_words_per_round": 1}},
+            FakeLLM([]),
+        )
+        self.assertEqual([card.id for card in runner._select_batch()], [1])
+
+    def test_commit_round_writes_capped_round_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "rounds.jsonl"
+            for card_id, word in ((1, "dokter"), (2, "fiets"), (3, "boek")):
+                col = FakeCollection([FakeCard(card_id, word, f"{word}-en", due=card_id)], [])
+                llm = FakeLLM([{"sentence": f"zin {card_id}", "words_used": [word]}])
+                runner = SessionRunner(
+                    col,
+                    {
+                        "decks": ["Dutch"],
+                        "session": {
+                            "round_log_path": str(log_path),
+                            "round_log_max_entries": 2,
+                        },
+                    },
+                    llm,
+                )
+                round_data = runner.prepare_next_round()
+                assert round_data is not None
+                runner.commit_round(round_data, {card_id: "good"})
+
+            entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(entries), 2)
+            self.assertEqual([entry["sentence"] for entry in entries], ["zin 2", "zin 3"])
+
+    def test_commit_round_log_records_stage_mix_and_ratings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "rounds.jsonl"
+            col = FakeCollection(
+                [
+                    FakeCard(1, "dokter", "doctor", due=1, card_type=2),
+                    FakeCard(2, "fiets", "bike", due=2, card_type=0),
+                ],
+                [],
+            )
+            llm = FakeLLM(
+                [
+                    {
+                        "sentence": "Mijn dokter ziet een fiets.",
+                        "words_used": ["dokter", "fiets"],
+                    }
+                ]
+            )
+            runner = SessionRunner(
+                col,
+                {
+                    "decks": ["Dutch"],
+                    "session": {"round_log_path": str(log_path)},
+                },
+                llm,
+            )
+            round_data = runner.prepare_next_round()
+            assert round_data is not None
+            runner.commit_round(round_data, {1: "hard", 2: "again"})
+
+            entry = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(entry["stats"]["word_count"], 2)
+            self.assertEqual(entry["stats"]["new_cards"], 1)
+            self.assertEqual(entry["stats"]["review_cards"], 1)
+            self.assertEqual(entry["stats"]["ratings"]["again"], 1)
+            self.assertEqual(entry["stats"]["ratings"]["hard"], 1)
+            self.assertEqual([row["stage_before"] for row in entry["rows"]], ["review", "new"])
 
     def test_build_generation_prompt_forbids_switching_to_english(self) -> None:
         prompt = build_generation_prompt(["rok", "plein", "weet"])
