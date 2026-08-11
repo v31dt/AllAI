@@ -9,6 +9,7 @@ from session_dialog import (
     choose_next_active_row_index,
     choose_session_deck_name,
     is_reveal_toggle_key,
+    provider_settings_error,
     rating_for_key,
 )
 
@@ -36,6 +37,18 @@ class SessionDialogTests(unittest.TestCase):
     def test_is_reveal_toggle_key_maps_space(self) -> None:
         self.assertTrue(is_reveal_toggle_key(Qt.Key.Key_Space))
         self.assertFalse(is_reveal_toggle_key(Qt.Key.Key_Return))
+
+    def test_provider_settings_accept_openai_compatible_urls(self) -> None:
+        self.assertIsNone(provider_settings_error("https://openrouter.ai/api/v1", "openai/gpt-4o-mini"))
+        self.assertIsNone(provider_settings_error("http://localhost:11434/v1", "llama3.2"))
+
+    def test_provider_settings_require_valid_url_and_model(self) -> None:
+        self.assertEqual(provider_settings_error("", "model"), "Base URL is required.")
+        self.assertEqual(
+            provider_settings_error("localhost:11434/v1", "model"),
+            "Base URL must be a valid HTTP or HTTPS URL.",
+        )
+        self.assertEqual(provider_settings_error("https://example.com/v1", ""), "Model is required.")
 
     def test_active_row_index_for_direction_moves_and_clamps(self) -> None:
         row_widgets = [_FakeRowWidget(revealed=False, rating=None) for _ in range(3)]

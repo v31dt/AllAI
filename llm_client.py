@@ -11,6 +11,8 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
 except ImportError:  # pragma: no cover
     from session import LLMUnavailableError, SentenceGenerationError
 
+USER_AGENT = "AllAI/0.1 (+https://github.com/v31dt/AllAI)"
+
 
 def resolve_chat_completions_url(base_url: str) -> str:
     normalized = base_url.rstrip("/")
@@ -83,6 +85,8 @@ class OpenAICompatibleClient:
             data=data,
             headers={
                 "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
                 **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
             },
             method="POST",

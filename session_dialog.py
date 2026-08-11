@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import partial
 from typing import Any
+from urllib.parse import urlparse
 
 from aqt.qt import (
     QApplication,
@@ -111,14 +112,28 @@ def choose_next_active_row_index(row_widgets: list[Any], current_index: int | No
     return None
 
 
+def provider_settings_error(base_url: str, model: str) -> str | None:
+    normalized_url = base_url.strip()
+    if not normalized_url:
+        return "Base URL is required."
+    parsed = urlparse(normalized_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "Base URL must be a valid HTTP or HTTPS URL."
+    if not model.strip():
+        return "Model is required."
+    return None
+
+
 class SettingsDialog(QDialog):
     def __init__(self, mw: Any) -> None:
         super().__init__(mw)
         self.mw = mw
         self.config = self._load_config()
+        self.base_url_input = QLineEdit()
         self.api_key_input = QLineEdit()
+        self.model_input = QLineEdit()
         self.setWindowTitle("AllAI Settings")
-        self.resize(520, 140)
+        self.resize(580, 210)
         self._build_ui()
 
     def _load_config(self) -> dict[str, Any]:
@@ -128,15 +143,24 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        intro = QLabel("Configure the OpenAI-compatible API key used for AllAI sessions.")
+        intro = QLabel("Configure the OpenAI-compatible provider used for AllAI sessions.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         form = QFormLayout()
+        llm_config = self.config.get("llm", {})
+        self.base_url_input.setPlaceholderText("https://api.openai.com/v1")
+        self.base_url_input.setText(str(llm_config.get("base_url", "") or ""))
+        form.addRow("Base URL", self.base_url_input)
+
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_input.setPlaceholderText("sk-...")
-        self.api_key_input.setText(str(self.config.get("llm", {}).get("api_key", "") or ""))
+        self.api_key_input.setPlaceholderText("Optional for local providers")
+        self.api_key_input.setText(str(llm_config.get("api_key", "") or ""))
         form.addRow("API key", self.api_key_input)
+
+        self.model_input.setPlaceholderText("Provider model ID")
+        self.model_input.setText(str(llm_config.get("model", "") or ""))
+        form.addRow("Model", self.model_input)
         layout.addLayout(form)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -145,9 +169,18 @@ class SettingsDialog(QDialog):
         layout.addWidget(button_box)
 
     def accept(self) -> None:
+        base_url = self.base_url_input.text().strip()
+        model = self.model_input.text().strip()
+        error = provider_settings_error(base_url, model)
+        if error:
+            showWarning(error, parent=self)
+            return
+
         raw = self.mw.addonManager.getConfig(__name__) or {}
         llm = raw.setdefault("llm", {})
+        llm["base_url"] = base_url
         llm["api_key"] = self.api_key_input.text().strip()
+        llm["model"] = model
         self.mw.addonManager.writeConfig(__name__, raw)
         super().accept()
 
