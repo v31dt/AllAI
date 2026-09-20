@@ -5,15 +5,20 @@ from typing import Any
 from urllib.parse import urlparse
 
 from aqt.qt import (
+    QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QKeySequence,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QShortcut,
@@ -22,7 +27,8 @@ from aqt.qt import (
     QVBoxLayout,
     QWidget,
 )
-from aqt.utils import showInfo, showWarning, tooltip
+from aqt.sound import av_player
+from aqt.utils import askUser, showInfo, showWarning, tooltip
 
 try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     from .llm_client import OpenAICompatibleClient
@@ -37,6 +43,16 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
         deep_merge_config,
         normalize_cefr_level,
     )
+    from .tts import (
+        PiperService,
+        TEST_SENTENCE,
+        TTSUnavailableError,
+        install_piper,
+        piper_install_status,
+        remove_piper_install,
+        tts_enabled_for_decks,
+        tts_round_eligible,
+    )
 except ImportError:  # pragma: no cover
     from llm_client import OpenAICompatibleClient
     from session import (
@@ -49,6 +65,16 @@ except ImportError:  # pragma: no cover
         build_filtered_deck_searches,
         deep_merge_config,
         normalize_cefr_level,
+    )
+    from tts import (
+        PiperService,
+        TEST_SENTENCE,
+        TTSUnavailableError,
+        install_piper,
+        piper_install_status,
+        remove_piper_install,
+        tts_enabled_for_decks,
+        tts_round_eligible,
     )
 
 FILTERED_DECK_NAME = "AllAI Session"
@@ -132,8 +158,18 @@ class SettingsDialog(QDialog):
         self.base_url_input = QLineEdit()
         self.api_key_input = QLineEdit()
         self.model_input = QLineEdit()
+        self.tts_enabled_input = QCheckBox("Enable local sentence audio")
+        self.tts_deck_list = QListWidget()
+        self.tts_length_scale_input = QDoubleSpinBox()
+        self.tts_status_label = QLabel("")
+        self.tts_progress = QProgressBar()
+        self.tts_install_button = QPushButton("Install / Repair")
+        self.tts_test_button = QPushButton("Play test")
+        self.tts_remove_button = QPushButton("Remove local files")
+        self._tts_test_service: PiperService | None = None
+        self._tts_installing = False
         self.setWindowTitle("AllAI Settings")
-        self.resize(580, 210)
+        self.resize(620, 520)
         self._build_ui()
 
     def _load_config(self) -> dict[str, Any]:
@@ -163,12 +199,66 @@ class SettingsDialog(QDialog):
         form.addRow("Model", self.model_input)
         layout.addLayout(form)
 
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        tts_heading = QLabel("<b>Local sentence audio</b>")
+        layout.addWidget(tts_heading)
+        tts_help = QLabel(
+            "Generate target-language recognition audio locally with Piper. "
+            "Production prompts in the native language do not generate audio. "
+            "The first install downloads about 135 MB and uses about 260 MB on disk."
+        )
+        tts_help.setWordWrap(True)
+        layout.addWidget(tts_help)
+
+        tts_config = self.config.get("tts", {})
+        self.tts_enabled_input.setChecked(bool(tts_config.get("enabled", False)))
+        layout.addWidget(self.tts_enabled_input)
+
+        tts_form = QFormLayout()
+        enabled_decks = {str(deck) for deck in tts_config.get("enabled_decks", [])}
+        self.tts_deck_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.tts_deck_list.setMaximumHeight(130)
+        for deck in sorted(self.mw.col.decks.all(), key=lambda item: item["name"].casefold()):
+            if deck.get("dyn"):
+                continue
+            self.tts_deck_list.addItem(deck["name"])
+            item = self.tts_deck_list.item(self.tts_deck_list.count() - 1)
+            item.setSelected(deck["name"] in enabled_decks)
+        tts_form.addRow("Dutch decks", self.tts_deck_list)
+
+        self.tts_length_scale_input.setRange(0.7, 1.4)
+        self.tts_length_scale_input.setSingleStep(0.05)
+        self.tts_length_scale_input.setDecimals(2)
+        self.tts_length_scale_input.setSuffix("x duration")
+        self.tts_length_scale_input.setValue(float(tts_config.get("length_scale", 1.0)))
+        tts_form.addRow("Speech pace", self.tts_length_scale_input)
+        layout.addLayout(tts_form)
+
+        self.tts_status_label.setWordWrap(True)
+        layout.addWidget(self.tts_status_label)
+        self.tts_progress.setRange(0, 0)
+        self.tts_progress.setVisible(False)
+        layout.addWidget(self.tts_progress)
+        tts_actions = QHBoxLayout()
+        tts_actions.addWidget(self.tts_install_button)
+        tts_actions.addWidget(self.tts_test_button)
+        tts_actions.addWidget(self.tts_remove_button)
+        tts_actions.addStretch(1)
+        layout.addLayout(tts_actions)
+        self.tts_install_button.clicked.connect(self._install_tts)
+        self.tts_test_button.clicked.connect(self._test_tts)
+        self.tts_remove_button.clicked.connect(self._remove_tts)
+        self._refresh_tts_status()
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
 
     def accept(self) -> None:
+        if self._tts_installing:
+            return
         base_url = self.base_url_input.text().strip()
         model = self.model_input.text().strip()
         error = provider_settings_error(base_url, model)
@@ -181,8 +271,106 @@ class SettingsDialog(QDialog):
         llm["base_url"] = base_url
         llm["api_key"] = self.api_key_input.text().strip()
         llm["model"] = model
+        tts = raw.setdefault("tts", {})
+        tts["enabled"] = self.tts_enabled_input.isChecked()
+        tts["engine"] = "piper"
+        tts["language"] = "nl_BE"
+        tts["voice"] = "nl_BE-nathalie-medium"
+        tts["enabled_decks"] = self._selected_tts_decks()
+        tts["length_scale"] = self.tts_length_scale_input.value()
         self.mw.addonManager.writeConfig(__name__, raw)
+        self._close_tts_test_service()
         super().accept()
+
+    def reject(self) -> None:
+        if self._tts_installing:
+            showWarning("Wait for the sentence-audio installation to finish.", parent=self)
+            return
+        self._close_tts_test_service()
+        super().reject()
+
+    def _selected_tts_decks(self) -> list[str]:
+        return [item.text() for item in self.tts_deck_list.selectedItems()]
+
+    def _refresh_tts_status(self) -> None:
+        status = piper_install_status()
+        self.tts_status_label.setText(status.detail)
+        self.tts_test_button.setEnabled(status.installed)
+        self.tts_remove_button.setEnabled(status.installed)
+
+    def _set_tts_actions_enabled(self, enabled: bool) -> None:
+        self.tts_install_button.setEnabled(enabled)
+        self.tts_test_button.setEnabled(enabled and piper_install_status().installed)
+        self.tts_remove_button.setEnabled(enabled and piper_install_status().installed)
+
+    def _install_tts(self) -> None:
+        self._close_tts_test_service()
+        self._set_tts_actions_enabled(False)
+        self._tts_installing = True
+        self.tts_progress.setVisible(True)
+        self.button_box.setEnabled(False)
+        self.tts_status_label.setText("Installing Piper and the Dutch voice... this may take a few minutes.")
+        self.mw.taskman.run_in_background(
+            install_piper,
+            self._on_tts_installed,
+            uses_collection=False,
+        )
+
+    def _on_tts_installed(self, future: Any) -> None:
+        self._tts_installing = False
+        self.tts_progress.setVisible(False)
+        self.button_box.setEnabled(True)
+        self._set_tts_actions_enabled(True)
+        try:
+            future.result()
+        except Exception as exc:
+            self.tts_status_label.setText("Installation failed.")
+            showWarning(f"Could not install sentence audio:\n{exc}", parent=self)
+            return
+        self.tts_enabled_input.setChecked(True)
+        self._refresh_tts_status()
+        tooltip("Local sentence audio installed.", parent=self)
+
+    def _test_tts(self) -> None:
+        self._close_tts_test_service()
+        try:
+            self._tts_test_service = PiperService(length_scale=self.tts_length_scale_input.value())
+        except TTSUnavailableError as exc:
+            showWarning(str(exc), parent=self)
+            return
+        self.tts_test_button.setEnabled(False)
+        self.tts_status_label.setText("Preparing test sentence...")
+        service = self._tts_test_service
+        self.mw.taskman.run_in_background(
+            lambda: service.synthesize(TEST_SENTENCE, 0),
+            self._on_tts_test_ready,
+            uses_collection=False,
+        )
+
+    def _on_tts_test_ready(self, future: Any) -> None:
+        self.tts_test_button.setEnabled(True)
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.tts_status_label.setText("Test failed.")
+            showWarning(f"Could not generate the test sentence:\n{exc}", parent=self)
+            return
+        self._refresh_tts_status()
+        av_player.play_file(str(result.path))
+
+    def _remove_tts(self) -> None:
+        if not askUser("Remove the local Piper runtime and Dutch voice (about 260 MB)?", parent=self):
+            return
+        self._close_tts_test_service()
+        remove_piper_install()
+        self.tts_enabled_input.setChecked(False)
+        self._refresh_tts_status()
+
+    def _close_tts_test_service(self) -> None:
+        av_player.stop_and_clear_queue()
+        if self._tts_test_service is not None:
+            self._tts_test_service.close()
+            self._tts_test_service = None
 
 
 class SessionLaunchDialog(QDialog):
@@ -365,6 +553,10 @@ class SessionDialog(QDialog):
         self.row_widgets: list[WordRowWidget] = []
         self.active_row_index: int | None = None
         self._shortcuts: list[QShortcut] = []
+        self.tts_service: PiperService | None = None
+        self.current_audio_path: str | None = None
+        self.audio_request_id = 0
+        self._tts_failure_shown = False
 
         self.setWindowTitle("AllAI Session")
         self.resize(880, 520)
@@ -383,6 +575,7 @@ class SessionDialog(QDialog):
         self.header_label = QLabel("Round 1 · 0 words reviewed")
         root.addWidget(self.header_label)
 
+        sentence_row = QHBoxLayout()
         self.sentence_label = QLabel("")
         self.sentence_label.setWordWrap(True)
         self.sentence_label.setTextFormat(Qt.TextFormat.RichText)
@@ -392,7 +585,13 @@ class SessionDialog(QDialog):
         # keyboard shortcuts.
         self.sentence_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.sentence_label.setCursor(Qt.CursorShape.IBeamCursor)
-        root.addWidget(self.sentence_label)
+        sentence_row.addWidget(self.sentence_label, 1)
+        self.audio_button = QPushButton("Play audio")
+        self.audio_button.setVisible(False)
+        self.audio_button.setEnabled(False)
+        self.audio_button.clicked.connect(self._play_round_audio)
+        sentence_row.addWidget(self.audio_button)
+        root.addLayout(sentence_row)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -426,6 +625,7 @@ class SessionDialog(QDialog):
         self._register_shortcut(QKeySequence(Qt.Key.Key_Space), self._toggle_active_row_reveal)
         self._register_shortcut(QKeySequence(Qt.Key.Key_Up), partial(self._move_active_row, -1))
         self._register_shortcut(QKeySequence(Qt.Key.Key_Down), partial(self._move_active_row, 1))
+        self._register_shortcut(QKeySequence("R"), self._play_round_audio)
 
     def _register_shortcut(self, sequence: QKeySequence, handler: Any) -> None:
         shortcut = QShortcut(sequence, self)
@@ -547,6 +747,71 @@ class SessionDialog(QDialog):
             self.rows_layout.addWidget(widget)
         self.rows_layout.addStretch(1)
         self._set_active_row_index(0 if self.row_widgets else None)
+        self._prepare_round_audio(round_data)
+
+    def _prepare_round_audio(self, round_data: RoundData) -> None:
+        decks = self.config.get("decks", [])
+        if not tts_enabled_for_decks(self.config, decks):
+            self.audio_button.setVisible(False)
+            return
+        self.audio_button.setVisible(True)
+        if not tts_round_eligible(self.config, decks, round_data.direction):
+            self.audio_button.setText("Audio disabled for production rounds")
+            self.audio_button.setEnabled(False)
+            return
+        if not piper_install_status().installed:
+            self.audio_button.setText("Audio not installed")
+            self.audio_button.setEnabled(False)
+            return
+        if self.tts_service is None:
+            try:
+                self.tts_service = PiperService(
+                    length_scale=float(self.config.get("tts", {}).get("length_scale", 1.0))
+                )
+            except TTSUnavailableError as exc:
+                self._show_tts_failure(exc)
+                return
+        self.audio_request_id += 1
+        request_id = self.audio_request_id
+        service = self.tts_service
+        self.audio_button.setText("Preparing audio...")
+        self.audio_button.setEnabled(False)
+        self.mw.taskman.run_in_background(
+            lambda: service.synthesize(round_data.sentence, request_id),
+            partial(self._on_round_audio_ready, request_id),
+            uses_collection=False,
+        )
+
+    def _on_round_audio_ready(self, request_id: int, future: Any) -> None:
+        if request_id != self.audio_request_id:
+            return
+        try:
+            result = future.result()
+        except Exception as exc:
+            self._show_tts_failure(exc)
+            return
+        if result.request_id != self.audio_request_id or self.current_round is None:
+            return
+        self.current_audio_path = str(result.path)
+        self.audio_button.setText("Play audio (R)")
+        self.audio_button.setEnabled(True)
+
+    def _show_tts_failure(self, exc: Exception) -> None:
+        self.audio_button.setVisible(True)
+        self.audio_button.setText("Audio unavailable")
+        self.audio_button.setEnabled(False)
+        if not self._tts_failure_shown:
+            tooltip(f"Sentence audio unavailable: {exc}", parent=self)
+            self._tts_failure_shown = True
+
+    def _play_round_audio(self) -> None:
+        if self.current_audio_path and self.audio_button.isEnabled():
+            av_player.play_file_with_caller(self.current_audio_path, self)
+
+    def _stop_round_audio(self) -> None:
+        self.audio_request_id += 1
+        self.current_audio_path = None
+        av_player.stop_and_clear_queue_if_caller(self)
 
     def _update_next_state(self) -> None:
         if not self.row_widgets:
@@ -588,6 +853,7 @@ class SessionDialog(QDialog):
     def _commit_round(self) -> None:
         if self.current_round is None:
             return
+        self._stop_round_audio()
         ratings = {
             widget.row.card_id: widget.rating
             for widget in self.row_widgets
@@ -638,6 +904,10 @@ class SessionDialog(QDialog):
         if self._session_cleaned_up:
             return
         self._session_cleaned_up = True
+        self._stop_round_audio()
+        if self.tts_service is not None:
+            self.tts_service.close()
+            self.tts_service = None
         if self.session_deck_id is not None:
             self.mw.col.sched.empty_filtered_deck(self.session_deck_id)
         self.mw.col.decks.select(self.previous_deck_id)

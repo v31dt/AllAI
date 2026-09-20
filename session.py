@@ -33,6 +33,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_key": "",
         "model": "gpt-4o-mini",
     },
+    "tts": {
+        "enabled": False,
+        "engine": "piper",
+        "language": "nl_BE",
+        "voice": "nl_BE-nathalie-medium",
+        "enabled_decks": [],
+        "length_scale": 1.0,
+    },
     "decks": [],
     "session": {
         "words_per_sentence": 4,

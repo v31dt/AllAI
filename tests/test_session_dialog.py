@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from concurrent.futures import Future
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from aqt.qt import Qt
 
@@ -11,6 +14,7 @@ from session_dialog import (
     is_reveal_toggle_key,
     provider_settings_error,
     rating_for_key,
+    SessionDialog,
 )
 
 
@@ -49,6 +53,27 @@ class SessionDialogTests(unittest.TestCase):
             "Base URL must be a valid HTTP or HTTPS URL.",
         )
         self.assertEqual(provider_settings_error("https://example.com/v1", ""), "Model is required.")
+
+    def test_stale_audio_failure_does_not_change_current_round(self) -> None:
+        failure_calls: list[Exception] = []
+        dialog = SimpleNamespace(audio_request_id=3, _show_tts_failure=failure_calls.append)
+        future: Future[object] = Future()
+        future.set_exception(RuntimeError("old request failed"))
+
+        SessionDialog._on_round_audio_ready(dialog, 2, future)
+
+        self.assertEqual(failure_calls, [])
+
+    def test_stop_round_audio_only_stops_playback_owned_by_session(self) -> None:
+        dialog = SimpleNamespace(audio_request_id=4, current_audio_path="/tmp/round.wav")
+
+        with patch("session_dialog.av_player") as player:
+            SessionDialog._stop_round_audio(dialog)
+
+        self.assertEqual(dialog.audio_request_id, 5)
+        self.assertIsNone(dialog.current_audio_path)
+        player.stop_and_clear_queue_if_caller.assert_called_once_with(dialog)
+        player.stop_and_clear_queue.assert_not_called()
 
     def test_active_row_index_for_direction_moves_and_clamps(self) -> None:
         row_widgets = [_FakeRowWidget(revealed=False, rating=None) for _ in range(3)]
