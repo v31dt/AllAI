@@ -1,8 +1,9 @@
 # AllAI
 
-AllAI reviews several Anki vocabulary cards inside one short, generated sentence.
-Each word is still rated separately. The approach is based on the contextual
-vocabulary review method described by Paddags et al. (2024).
+AllAI reviews several Anki vocabulary cards inside one short, generated sentence
+to improve retention through varied context. In a study of 26 Danish learners,
+[Paddags et al. (2024)](https://aclanthology.org/2024.bea-1.29/) reported that
+this method taught new words four times faster than conventional spaced repetition.
 
 AllAI does **not** replace Anki or FSRS. It reads Anki's queue and sends every
 rating back through Anki's normal scheduler.
@@ -112,7 +113,7 @@ Keyboard controls:
 Open **Tools > AllAI > Settings** and set:
 
 - An OpenAI-compatible base URL, API key, and model.
-- Optional local sentence audio and the decks where it is enabled.
+- Optional local sentence audio and a Piper voice for each language deck.
 - Piper voice speed and local runtime installation.
 
 Deck and CEFR level are selected when starting a session. Anki's add-on config
@@ -121,19 +122,42 @@ controls `card_mode` (`recognition`, `production`, or `both`), `due_only`,
 
 ## Local audio
 
-AllAI maps each language deck to a Piper voice. The bundled registry currently
-includes Belgian Dutch `nl_BE-nathalie-medium` and Mandarin Chinese
-`zh_CN-huayan-medium`; all installed voices share one local runtime. Production
-rounds do not generate audio. This is based on card direction, not deck names.
+AllAI maps each language deck to a locally installed Piper voice. Voice models
+are downloaded from **Settings > Deck voices**; they are not bundled with the
+repository. Production rounds do not generate audio.
+
+Setup:
+
+1. Install Anki's playback backend. On Arch Linux or CachyOS, run
+   `sudo pacman -S --needed mpv`, then restart Anki.
+2. Open **Tools > AllAI > Settings** and enable local sentence audio.
+3. In **Deck voices**, assign a voice to each deck that should have audio.
+4. Click **Install / Repair**. AllAI creates an isolated Piper runtime and
+   downloads every assigned voice that is missing. Internet access is required
+   for this step only.
+5. Select a configured deck row, click **Play test**, then save with **OK**.
+
+Do not install Piper or copy models manually. AllAI manages this directory:
+
+```text
+user_files/piper/current/
+├── runtime/                  # isolated Python environment with Piper
+├── models/
+│   ├── <voice>.onnx         # downloaded voice model
+│   └── <voice>.onnx.json    # voice configuration
+└── manifest.json
+```
+
+`user_files/` is ignored by Git. Voice models therefore remain local and must be
+installed separately on another computer.
 
 ```text
 Round appears -> Piper creates WAV in background -> Play audio / R -> temp WAV removed on exit
 ```
 
-Install `mpv` or `mplayer`, assign voices under **Settings > Deck voices**, then
-use **Install / Repair**. Runtime and models are stored in ignored
-`user_files/piper/current/` and are never committed. **Play test** uses the voice
-assigned to the selected deck; **Remove selected voice** removes only that model.
+**Install / Repair** verifies assigned models and repairs missing or damaged
+files. **Remove selected voice** removes only the model assigned to the selected
+deck; the shared Piper runtime and other voices remain available.
 
 ## Development
 
