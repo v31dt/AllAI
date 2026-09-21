@@ -36,9 +36,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tts": {
         "enabled": False,
         "engine": "piper",
-        "language": "nl_BE",
-        "voice": "nl_BE-nathalie-medium",
-        "enabled_decks": [],
+        "deck_voices": {},
         "length_scale": 1.0,
     },
     "decks": [],

@@ -29,10 +29,36 @@ PIPER_PACKAGES = (
     "protobuf==7.36.2",
 )
 DEFAULT_VOICE = "nl_BE-nathalie-medium"
-VOICE_MODEL_SHA256 = "49cf48023861f9fd42e13a8632f068fee67d1ce244a6ee38f29595afbf0a6be4"
-VOICE_CONFIG_SHA256 = "4704af2736022e910a3f32672480d5530dd39da5c2bcc079f315f604166ff0de"
-TEST_SENTENCE = "Ik volg een cursus omdat ik zo snel mogelijk Nederlands wil leren."
 
+
+@dataclass(frozen=True)
+class VoiceSpec:
+    voice_id: str
+    display_name: str
+    language: str
+    test_sentence: str
+    model_sha256: str
+    config_sha256: str
+
+
+VOICE_SPECS = {
+    DEFAULT_VOICE: VoiceSpec(
+        voice_id=DEFAULT_VOICE,
+        display_name="Dutch (Belgium) - Nathalie",
+        language="nl_BE",
+        test_sentence="Ik volg een cursus omdat ik zo snel mogelijk Nederlands wil leren.",
+        model_sha256="49cf48023861f9fd42e13a8632f068fee67d1ce244a6ee38f29595afbf0a6be4",
+        config_sha256="4704af2736022e910a3f32672480d5530dd39da5c2bcc079f315f604166ff0de",
+    ),
+    "zh_CN-huayan-medium": VoiceSpec(
+        voice_id="zh_CN-huayan-medium",
+        display_name="Mandarin Chinese - Huayan",
+        language="zh_CN",
+        test_sentence="我的朋友最喜欢吃面条、饺子和包子。",
+        model_sha256="9929917bf8cabb26fd528ea44d3a6699c11e87317a14765312420be230be0f3d",
+        config_sha256="d521dc45504a8ccc99e325822b35946dd701840bfb07e3dbb31a40929ed6a82b",
+    ),
+}
 
 class TTSInstallError(Exception):
     pass
@@ -69,7 +95,7 @@ def default_piper_root() -> Path:
     return Path(__file__).resolve().parent / "user_files" / "piper"
 
 
-def piper_paths(root: Path | None = None) -> PiperPaths:
+def piper_paths(root: Path | None = None, voice_id: str = DEFAULT_VOICE) -> PiperPaths:
     root = Path(root) if root is not None else default_piper_root()
     active = root / "current"
     executable = "python.exe" if os.name == "nt" else "python"
@@ -79,8 +105,8 @@ def piper_paths(root: Path | None = None) -> PiperPaths:
         root=root,
         active=active,
         python=active / "runtime" / scripts_dir / executable,
-        model=model_dir / f"{DEFAULT_VOICE}.onnx",
-        model_config=model_dir / f"{DEFAULT_VOICE}.onnx.json",
+        model=model_dir / f"{voice_id}.onnx",
+        model_config=model_dir / f"{voice_id}.onnx.json",
         manifest=active / "manifest.json",
     )
 
@@ -93,18 +119,26 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def piper_install_status(root: Path | None = None) -> PiperInstallStatus:
-    paths = piper_paths(root)
-    required = (paths.python, paths.model, paths.model_config, paths.manifest)
-    if not all(path.is_file() for path in required):
-        return PiperInstallStatus(False, "Not installed (about 260 MB)")
+def piper_install_status(
+    root: Path | None = None, voice_id: str = DEFAULT_VOICE
+) -> PiperInstallStatus:
+    if voice_id not in VOICE_SPECS:
+        return PiperInstallStatus(False, f"Unknown voice: {voice_id}")
+    paths = piper_paths(root, voice_id)
+    if not paths.python.is_file():
+        return PiperInstallStatus(False, "Piper runtime not installed")
+    if not paths.model.is_file() or not paths.model_config.is_file():
+        return PiperInstallStatus(False, f"Voice not installed: {voice_id}")
+    spec = VOICE_SPECS[voice_id]
+    if not paths.manifest.is_file():
+        return PiperInstallStatus(False, "Installation is incomplete; repair required")
     try:
         manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return PiperInstallStatus(False, "Installation is incomplete; repair required")
-    if manifest.get("piper_version") != PIPER_VERSION or manifest.get("voice") != DEFAULT_VOICE:
+    if manifest.get("piper_version") != PIPER_VERSION:
         return PiperInstallStatus(False, "Installation version mismatch; repair required")
-    return PiperInstallStatus(True, f"Installed: {DEFAULT_VOICE}")
+    return PiperInstallStatus(True, f"Installed: {spec.display_name}")
 
 
 def _run_checked(command: Sequence[str], *, timeout: int = 900) -> None:
@@ -123,9 +157,91 @@ def _run_checked(command: Sequence[str], *, timeout: int = 900) -> None:
         raise TTSInstallError(output[-2000:])
 
 
-def install_piper(root: Path | None = None, python_executable: str | None = None) -> PiperInstallStatus:
-    paths = piper_paths(root)
+def _verify_downloaded_voice(models: Path, voice_id: str) -> None:
+    spec = VOICE_SPECS[voice_id]
+    model = models / f"{voice_id}.onnx"
+    model_config = models / f"{voice_id}.onnx.json"
+    if not model.is_file() or not model_config.is_file():
+        raise TTSInstallError(f"Piper did not download all files for {voice_id}.")
+    if _sha256(model) != spec.model_sha256 or _sha256(model_config) != spec.config_sha256:
+        raise TTSInstallError(f"Downloaded Piper voice failed checksum verification: {voice_id}")
+
+
+def _installed_voice_verified(paths: PiperPaths, voice_id: str) -> bool:
+    spec = VOICE_SPECS[voice_id]
+    return (
+        paths.model.is_file()
+        and paths.model_config.is_file()
+        and _sha256(paths.model) == spec.model_sha256
+        and _sha256(paths.model_config) == spec.config_sha256
+    )
+
+
+def _write_manifest(active: Path, voice_ids: Sequence[str]) -> None:
+    installed = sorted(
+        voice_id
+        for voice_id in VOICE_SPECS
+        if (active / "models" / f"{voice_id}.onnx").is_file()
+        and (active / "models" / f"{voice_id}.onnx.json").is_file()
+    )
+    installed = sorted(set(installed) | set(voice_ids))
+    (active / "manifest.json").write_text(
+        json.dumps(
+            {
+                "piper_version": PIPER_VERSION,
+                "voices": installed,
+                "voice": DEFAULT_VOICE if DEFAULT_VOICE in installed else (installed[0] if installed else ""),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _install_voices_into_existing_runtime(paths: PiperPaths, voice_ids: Sequence[str]) -> None:
+    models = paths.active / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    for voice_id in voice_ids:
+        voice_paths = piper_paths(paths.root, voice_id)
+        if _installed_voice_verified(voice_paths, voice_id):
+            continue
+        staging = paths.root / f"voice-{uuid.uuid4().hex}"
+        try:
+            staging.mkdir(parents=True)
+            _run_checked(
+                [
+                    str(paths.python),
+                    "-m",
+                    "piper.download_voices",
+                    "--download-dir",
+                    str(staging),
+                    voice_id,
+                ]
+            )
+            _verify_downloaded_voice(staging, voice_id)
+            os.replace(staging / f"{voice_id}.onnx", models / f"{voice_id}.onnx")
+            os.replace(staging / f"{voice_id}.onnx.json", models / f"{voice_id}.onnx.json")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    _write_manifest(paths.active, voice_ids)
+
+
+def install_piper(
+    root: Path | None = None,
+    python_executable: str | None = None,
+    voice_ids: Sequence[str] | None = None,
+) -> PiperInstallStatus:
+    requested = list(dict.fromkeys(voice_ids or [DEFAULT_VOICE]))
+    unknown = [voice_id for voice_id in requested if voice_id not in VOICE_SPECS]
+    if unknown:
+        raise TTSInstallError(f"Unknown Piper voice: {unknown[0]}")
+    paths = piper_paths(root, requested[0])
     paths.root.mkdir(parents=True, exist_ok=True)
+    if paths.python.is_file():
+        _install_voices_into_existing_runtime(paths, requested)
+        return piper_install_status(paths.root, requested[0])
+
     staging = paths.root / f"installing-{uuid.uuid4().hex}"
     backup = paths.root / f"backup-{uuid.uuid4().hex}"
     source_python = python_executable or shutil.which("python3")
@@ -151,33 +267,19 @@ def install_piper(root: Path | None = None, python_executable: str | None = None
                 *PIPER_PACKAGES,
             ]
         )
-        _run_checked(
-            [
-                str(runtime_python),
-                "-m",
-                "piper.download_voices",
-                "--download-dir",
-                str(models),
-                DEFAULT_VOICE,
-            ]
-        )
-        model = models / f"{DEFAULT_VOICE}.onnx"
-        model_config = models / f"{DEFAULT_VOICE}.onnx.json"
-        if _sha256(model) != VOICE_MODEL_SHA256 or _sha256(model_config) != VOICE_CONFIG_SHA256:
-            raise TTSInstallError("Downloaded Piper voice failed checksum verification.")
-        (staging / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "piper_version": PIPER_VERSION,
-                    "voice": DEFAULT_VOICE,
-                    "model_sha256": VOICE_MODEL_SHA256,
-                    "config_sha256": VOICE_CONFIG_SHA256,
-                },
-                indent=2,
+        for voice_id in requested:
+            _run_checked(
+                [
+                    str(runtime_python),
+                    "-m",
+                    "piper.download_voices",
+                    "--download-dir",
+                    str(models),
+                    voice_id,
+                ]
             )
-            + "\n",
-            encoding="utf-8",
-        )
+            _verify_downloaded_voice(models, voice_id)
+        _write_manifest(staging, requested)
 
         if paths.active.exists():
             paths.active.rename(backup)
@@ -190,7 +292,15 @@ def install_piper(root: Path | None = None, python_executable: str | None = None
         if backup.exists() and not paths.active.exists():
             backup.rename(paths.active)
         raise
-    return piper_install_status(paths.root)
+    return piper_install_status(paths.root, requested[0])
+
+
+def remove_piper_voice(voice_id: str, root: Path | None = None) -> None:
+    paths = piper_paths(root, voice_id)
+    paths.model.unlink(missing_ok=True)
+    paths.model_config.unlink(missing_ok=True)
+    if paths.active.exists():
+        _write_manifest(paths.active, [])
 
 
 def remove_piper_install(root: Path | None = None) -> None:
@@ -199,24 +309,65 @@ def remove_piper_install(root: Path | None = None) -> None:
         shutil.rmtree(paths.active)
 
 
-def tts_enabled_for_decks(config: dict[str, Any], decks: Sequence[str]) -> bool:
+def configured_deck_voices(config: dict[str, Any]) -> dict[str, str]:
     tts_config = config.get("tts", {})
-    if not bool(tts_config.get("enabled")):
-        return False
+    # Upgrade the original Dutch-only deck checklist without requiring users to
+    # reconfigure it after installing multi-language support. Explicit mappings
+    # win when both formats are temporarily present.
+    configured = {
+        str(deck).strip(): DEFAULT_VOICE
+        for deck in tts_config.get("enabled_decks", [])
+        if str(deck).strip()
+    }
+    configured.update(
+        {
+            str(deck).strip(): str(voice_id).strip()
+            for deck, voice_id in (tts_config.get("deck_voices", {}) or {}).items()
+            if str(deck).strip() and str(voice_id).strip() in VOICE_SPECS
+        }
+    )
+    return configured
+
+
+def voice_for_decks(config: dict[str, Any], decks: Sequence[str]) -> str | None:
+    if not bool(config.get("tts", {}).get("enabled")):
+        return None
     selected = {str(deck).strip() for deck in decks if str(deck).strip()}
-    enabled = {str(deck).strip() for deck in tts_config.get("enabled_decks", []) if str(deck).strip()}
-    return bool(selected) and selected.issubset(enabled)
+    assignments = configured_deck_voices(config)
+    voices = {assignments.get(deck) for deck in selected}
+    if not selected or None in voices or len(voices) != 1:
+        return None
+    return next(iter(voices))
+
+
+def tts_enabled_for_decks(config: dict[str, Any], decks: Sequence[str]) -> bool:
+    return voice_for_decks(config, decks) is not None
+
+
+def tts_round_voice(config: dict[str, Any], decks: Sequence[str], direction: str) -> str | None:
+    if direction != RECOGNITION_DIRECTION:
+        return None
+    return voice_for_decks(config, decks)
 
 
 def tts_round_eligible(config: dict[str, Any], decks: Sequence[str], direction: str) -> bool:
-    return direction == RECOGNITION_DIRECTION and tts_enabled_for_decks(config, decks)
+    return tts_round_voice(config, decks, direction) is not None
 
 
 class PiperService:
-    def __init__(self, *, length_scale: float = 1.0, root: Path | None = None) -> None:
-        self.paths = piper_paths(root)
-        if not piper_install_status(self.paths.root).installed:
-            raise TTSUnavailableError("Piper is not installed. Open Tools -> AllAI -> Settings to install it.")
+    def __init__(
+        self,
+        *,
+        voice_id: str = DEFAULT_VOICE,
+        length_scale: float = 1.0,
+        root: Path | None = None,
+    ) -> None:
+        self.voice_id = voice_id
+        self.paths = piper_paths(root, voice_id)
+        if not piper_install_status(self.paths.root, voice_id).installed:
+            raise TTSUnavailableError(
+                f"Piper voice {voice_id} is not installed. Open Tools -> AllAI -> Settings to install it."
+            )
         self.length_scale = max(0.5, min(2.0, float(length_scale)))
         self._worker_script = Path(__file__).resolve().with_name("tts_worker.py")
         self._process: subprocess.Popen[str] | None = None

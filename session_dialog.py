@@ -5,7 +5,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from aqt.qt import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -17,12 +16,13 @@ from aqt.qt import (
     QKeySequence,
     QLabel,
     QLineEdit,
-    QListWidget,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QShortcut,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -45,13 +45,14 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
     )
     from .tts import (
         PiperService,
-        TEST_SENTENCE,
         TTSUnavailableError,
+        VOICE_SPECS,
+        configured_deck_voices,
         install_piper,
         piper_install_status,
-        remove_piper_install,
+        remove_piper_voice,
         tts_enabled_for_decks,
-        tts_round_eligible,
+        tts_round_voice,
     )
 except ImportError:  # pragma: no cover
     from llm_client import OpenAICompatibleClient
@@ -68,13 +69,14 @@ except ImportError:  # pragma: no cover
     )
     from tts import (
         PiperService,
-        TEST_SENTENCE,
         TTSUnavailableError,
+        VOICE_SPECS,
+        configured_deck_voices,
         install_piper,
         piper_install_status,
-        remove_piper_install,
+        remove_piper_voice,
         tts_enabled_for_decks,
-        tts_round_eligible,
+        tts_round_voice,
     )
 
 FILTERED_DECK_NAME = "AllAI Session"
@@ -159,13 +161,14 @@ class SettingsDialog(QDialog):
         self.api_key_input = QLineEdit()
         self.model_input = QLineEdit()
         self.tts_enabled_input = QCheckBox("Enable local sentence audio")
-        self.tts_deck_list = QListWidget()
+        self.tts_deck_table = QTableWidget()
+        self.tts_voice_combos: dict[str, QComboBox] = {}
         self.tts_length_scale_input = QDoubleSpinBox()
         self.tts_status_label = QLabel("")
         self.tts_progress = QProgressBar()
         self.tts_install_button = QPushButton("Install / Repair")
         self.tts_test_button = QPushButton("Play test")
-        self.tts_remove_button = QPushButton("Remove local files")
+        self.tts_remove_button = QPushButton("Remove selected voice")
         self._tts_test_service: PiperService | None = None
         self._tts_installing = False
         self.setWindowTitle("AllAI Settings")
@@ -204,7 +207,7 @@ class SettingsDialog(QDialog):
         tts_help = QLabel(
             "Generate target-language recognition audio locally with Piper. "
             "Production prompts in the native language do not generate audio. "
-            "The first install downloads about 135 MB and uses about 260 MB on disk."
+            "Assign one voice to each language deck; all voices share one Piper runtime."
         )
         tts_help.setWordWrap(True)
         layout.addWidget(tts_help)
@@ -214,16 +217,35 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tts_enabled_input)
 
         tts_form = QFormLayout()
-        enabled_decks = {str(deck) for deck in tts_config.get("enabled_decks", [])}
-        self.tts_deck_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        self.tts_deck_list.setMaximumHeight(130)
-        for deck in sorted(self.mw.col.decks.all(), key=lambda item: item["name"].casefold()):
-            if deck.get("dyn"):
-                continue
-            self.tts_deck_list.addItem(deck["name"])
-            item = self.tts_deck_list.item(self.tts_deck_list.count() - 1)
-            item.setSelected(deck["name"] in enabled_decks)
-        tts_form.addRow("Dutch decks", self.tts_deck_list)
+        assignments = configured_deck_voices(self.config)
+        decks = [
+            deck
+            for deck in sorted(self.mw.col.decks.all(), key=lambda item: item["name"].casefold())
+            if not deck.get("dyn")
+        ]
+        self.tts_deck_table.setColumnCount(3)
+        self.tts_deck_table.setHorizontalHeaderLabels(["Deck", "Voice", "Status"])
+        self.tts_deck_table.setRowCount(len(decks))
+        self.tts_deck_table.setMaximumHeight(190)
+        for row, deck in enumerate(decks):
+            deck_name = str(deck["name"])
+            self.tts_deck_table.setItem(row, 0, QTableWidgetItem(deck_name))
+            combo = QComboBox()
+            combo.addItem("Audio disabled", "")
+            for voice_id, spec in VOICE_SPECS.items():
+                combo.addItem(spec.display_name, voice_id)
+            configured_voice = assignments.get(deck_name, "")
+            configured_index = combo.findData(configured_voice)
+            combo.setCurrentIndex(max(0, configured_index))
+            combo.currentIndexChanged.connect(lambda _index: self._refresh_tts_status())
+            self.tts_voice_combos[deck_name] = combo
+            self.tts_deck_table.setCellWidget(row, 1, combo)
+            self.tts_deck_table.setItem(row, 2, QTableWidgetItem(""))
+        self.tts_deck_table.resizeColumnsToContents()
+        self.tts_deck_table.currentCellChanged.connect(
+            lambda _row, _column, _old_row, _old_column: self._refresh_tts_status()
+        )
+        tts_form.addRow("Deck voices", self.tts_deck_table)
 
         self.tts_length_scale_input.setRange(0.7, 1.4)
         self.tts_length_scale_input.setSingleStep(0.05)
@@ -274,10 +296,10 @@ class SettingsDialog(QDialog):
         tts = raw.setdefault("tts", {})
         tts["enabled"] = self.tts_enabled_input.isChecked()
         tts["engine"] = "piper"
-        tts["language"] = "nl_BE"
-        tts["voice"] = "nl_BE-nathalie-medium"
-        tts["enabled_decks"] = self._selected_tts_decks()
+        tts["deck_voices"] = self._deck_voice_assignments()
         tts["length_scale"] = self.tts_length_scale_input.value()
+        for legacy_key in ("language", "voice", "enabled_decks"):
+            tts.pop(legacy_key, None)
         self.mw.addonManager.writeConfig(__name__, raw)
         self._close_tts_test_service()
         super().accept()
@@ -289,29 +311,69 @@ class SettingsDialog(QDialog):
         self._close_tts_test_service()
         super().reject()
 
-    def _selected_tts_decks(self) -> list[str]:
-        return [item.text() for item in self.tts_deck_list.selectedItems()]
+    def _deck_voice_assignments(self) -> dict[str, str]:
+        return {
+            deck_name: str(combo.currentData())
+            for deck_name, combo in self.tts_voice_combos.items()
+            if combo.currentData()
+        }
+
+    def _selected_voice_id(self) -> str | None:
+        row = self.tts_deck_table.currentRow()
+        if row >= 0:
+            deck_item = self.tts_deck_table.item(row, 0)
+            if deck_item is not None:
+                voice_id = self.tts_voice_combos[deck_item.text()].currentData()
+                return str(voice_id) if voice_id else None
+        assignments = self._deck_voice_assignments()
+        return next(iter(assignments.values()), None)
 
     def _refresh_tts_status(self) -> None:
-        status = piper_install_status()
-        self.tts_status_label.setText(status.detail)
-        self.tts_test_button.setEnabled(status.installed)
-        self.tts_remove_button.setEnabled(status.installed)
+        assignments = self._deck_voice_assignments()
+        for row in range(self.tts_deck_table.rowCount()):
+            deck_item = self.tts_deck_table.item(row, 0)
+            status_item = self.tts_deck_table.item(row, 2)
+            if deck_item is None or status_item is None:
+                continue
+            voice_id = assignments.get(deck_item.text())
+            status_item.setText(piper_install_status(voice_id=voice_id).detail if voice_id else "Off")
+        assigned_voices = sorted(set(assignments.values()))
+        missing = [voice_id for voice_id in assigned_voices if not piper_install_status(voice_id=voice_id).installed]
+        if not assigned_voices:
+            summary = "Assign a voice to at least one deck."
+        elif missing:
+            summary = "Missing assigned voices: " + ", ".join(missing)
+        else:
+            summary = "All assigned voices are installed."
+        self.tts_status_label.setText(summary)
+        selected_voice = self._selected_voice_id()
+        selected_installed = bool(
+            selected_voice and piper_install_status(voice_id=selected_voice).installed
+        )
+        self.tts_test_button.setEnabled(selected_installed and not self._tts_installing)
+        self.tts_remove_button.setEnabled(selected_installed and not self._tts_installing)
 
     def _set_tts_actions_enabled(self, enabled: bool) -> None:
         self.tts_install_button.setEnabled(enabled)
-        self.tts_test_button.setEnabled(enabled and piper_install_status().installed)
-        self.tts_remove_button.setEnabled(enabled and piper_install_status().installed)
+        if enabled:
+            self._refresh_tts_status()
+        else:
+            self.tts_test_button.setEnabled(False)
+            self.tts_remove_button.setEnabled(False)
 
     def _install_tts(self) -> None:
+        voice_ids = sorted(set(self._deck_voice_assignments().values()))
+        if not voice_ids:
+            showWarning("Assign a voice to at least one deck first.", parent=self)
+            return
         self._close_tts_test_service()
         self._set_tts_actions_enabled(False)
         self._tts_installing = True
         self.tts_progress.setVisible(True)
         self.button_box.setEnabled(False)
-        self.tts_status_label.setText("Installing Piper and the Dutch voice... this may take a few minutes.")
+        self.tts_status_label.setText("Installing Piper and assigned voices... this may take a few minutes.")
         self.mw.taskman.run_in_background(
-            install_piper,
+            lambda: install_piper(voice_ids=voice_ids),
             self._on_tts_installed,
             uses_collection=False,
         )
@@ -333,16 +395,24 @@ class SettingsDialog(QDialog):
 
     def _test_tts(self) -> None:
         self._close_tts_test_service()
+        voice_id = self._selected_voice_id()
+        if not voice_id:
+            showWarning("Select a deck with an assigned voice first.", parent=self)
+            return
         try:
-            self._tts_test_service = PiperService(length_scale=self.tts_length_scale_input.value())
+            self._tts_test_service = PiperService(
+                voice_id=voice_id,
+                length_scale=self.tts_length_scale_input.value(),
+            )
         except TTSUnavailableError as exc:
             showWarning(str(exc), parent=self)
             return
         self.tts_test_button.setEnabled(False)
         self.tts_status_label.setText("Preparing test sentence...")
         service = self._tts_test_service
+        test_sentence = VOICE_SPECS[voice_id].test_sentence
         self.mw.taskman.run_in_background(
-            lambda: service.synthesize(TEST_SENTENCE, 0),
+            lambda: service.synthesize(test_sentence, 0),
             self._on_tts_test_ready,
             uses_collection=False,
         )
@@ -359,11 +429,14 @@ class SettingsDialog(QDialog):
         av_player.play_file(str(result.path))
 
     def _remove_tts(self) -> None:
-        if not askUser("Remove the local Piper runtime and Dutch voice (about 260 MB)?", parent=self):
+        voice_id = self._selected_voice_id()
+        if not voice_id:
+            return
+        voice_name = VOICE_SPECS[voice_id].display_name
+        if not askUser(f"Remove the local voice {voice_name}?", parent=self):
             return
         self._close_tts_test_service()
-        remove_piper_install()
-        self.tts_enabled_input.setChecked(False)
+        remove_piper_voice(voice_id)
         self._refresh_tts_status()
 
     def _close_tts_test_service(self) -> None:
@@ -755,17 +828,22 @@ class SessionDialog(QDialog):
             self.audio_button.setVisible(False)
             return
         self.audio_button.setVisible(True)
-        if not tts_round_eligible(self.config, decks, round_data.direction):
+        voice_id = tts_round_voice(self.config, decks, round_data.direction)
+        if voice_id is None:
             self.audio_button.setText("Audio disabled for production rounds")
             self.audio_button.setEnabled(False)
             return
-        if not piper_install_status().installed:
-            self.audio_button.setText("Audio not installed")
+        if not piper_install_status(voice_id=voice_id).installed:
+            self.audio_button.setText("Assigned voice not installed")
             self.audio_button.setEnabled(False)
             return
+        if self.tts_service is not None and self.tts_service.voice_id != voice_id:
+            self.tts_service.close()
+            self.tts_service = None
         if self.tts_service is None:
             try:
                 self.tts_service = PiperService(
+                    voice_id=voice_id,
                     length_scale=float(self.config.get("tts", {}).get("length_scale", 1.0))
                 )
             except TTSUnavailableError as exc:

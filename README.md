@@ -121,17 +121,19 @@ controls `card_mode` (`recognition`, `production`, or `both`), `due_only`,
 
 ## Local audio
 
-AllAI can synthesize recognition sentences locally with Piper using the Belgian
-Dutch `nl_BE-nathalie-medium` voice. Production rounds do not generate audio;
-this is based on card direction, not hard-coded deck names.
+AllAI maps each language deck to a Piper voice. The bundled registry currently
+includes Belgian Dutch `nl_BE-nathalie-medium` and Mandarin Chinese
+`zh_CN-huayan-medium`; all installed voices share one local runtime. Production
+rounds do not generate audio. This is based on card direction, not deck names.
 
 ```text
 Round appears -> Piper creates WAV in background -> Play audio / R -> temp WAV removed on exit
 ```
 
-Install `mpv` or `mplayer`, then use **Settings > Install / Repair**. The Piper
-runtime is stored in ignored `user_files/piper/current/`, takes about 260 MB, and
-is never committed. **Play test** checks it; **Remove local files** uninstalls it.
+Install `mpv` or `mplayer`, assign voices under **Settings > Deck voices**, then
+use **Install / Repair**. Runtime and models are stored in ignored
+`user_files/piper/current/` and are never committed. **Play test** uses the voice
+assigned to the selected deck; **Remove selected voice** removes only that model.
 
 ## Development
 
