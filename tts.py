@@ -354,6 +354,21 @@ def tts_round_eligible(config: dict[str, Any], decks: Sequence[str], direction: 
     return tts_round_voice(config, decks, direction) is not None
 
 
+def configured_speech_speed(config: dict[str, Any]) -> float:
+    """Return direct speech speed, migrating Piper's legacy inverse duration scale."""
+    tts_config = config.get("tts", {})
+    if "length_scale" in tts_config:
+        legacy_scale = max(0.5, min(2.0, float(tts_config.get("length_scale", 1.0))))
+        speed = 1.0 / legacy_scale
+    else:
+        speed = float(tts_config.get("speech_speed", 1.0))
+    return max(0.7, min(1.4, speed))
+
+
+def piper_length_scale_for_speed(speed: float) -> float:
+    return 1.0 / max(0.7, min(1.4, float(speed)))
+
+
 class PiperService:
     def __init__(
         self,

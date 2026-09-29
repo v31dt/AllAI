@@ -11,10 +11,12 @@ from session import DEFAULT_CONFIG, PRODUCTION_DIRECTION, RECOGNITION_DIRECTION,
 import tts
 from tts import (
     VoiceSpec,
+    configured_speech_speed,
     configured_deck_voices,
     install_piper,
     piper_install_status,
     piper_paths,
+    piper_length_scale_for_speed,
     tts_enabled_for_decks,
     tts_round_eligible,
     tts_round_voice,
@@ -55,6 +57,15 @@ class TTSTests(unittest.TestCase):
         config = {"tts": {"enabled": True, "enabled_decks": ["Dutch"]}}
         self.assertEqual(configured_deck_voices(config), {"Dutch": tts.DEFAULT_VOICE})
         self.assertEqual(voice_for_decks(config, ["Dutch"]), tts.DEFAULT_VOICE)
+
+    def test_speech_speed_uses_persisted_value(self) -> None:
+        config = {"tts": {"speech_speed": 1.25}}
+        self.assertEqual(configured_speech_speed(config), 1.25)
+        self.assertEqual(piper_length_scale_for_speed(1.25), 0.8)
+
+    def test_legacy_duration_scale_migrates_to_direct_speed(self) -> None:
+        config = deep_merge_config(DEFAULT_CONFIG, {"tts": {"length_scale": 0.8}})
+        self.assertEqual(configured_speech_speed(config), 1.25)
 
     def test_install_status_requires_complete_manifest_and_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -47,8 +47,10 @@ try:  # pragma: no cover - import mode depends on Anki loader vs local tests
         PiperService,
         TTSUnavailableError,
         VOICE_SPECS,
+        configured_speech_speed,
         configured_deck_voices,
         install_piper,
+        piper_length_scale_for_speed,
         piper_install_status,
         remove_piper_voice,
         tts_enabled_for_decks,
@@ -71,8 +73,10 @@ except ImportError:  # pragma: no cover
         PiperService,
         TTSUnavailableError,
         VOICE_SPECS,
+        configured_speech_speed,
         configured_deck_voices,
         install_piper,
+        piper_length_scale_for_speed,
         piper_install_status,
         remove_piper_voice,
         tts_enabled_for_decks,
@@ -163,7 +167,7 @@ class SettingsDialog(QDialog):
         self.tts_enabled_input = QCheckBox("Enable local sentence audio")
         self.tts_deck_table = QTableWidget()
         self.tts_voice_combos: dict[str, QComboBox] = {}
-        self.tts_length_scale_input = QDoubleSpinBox()
+        self.tts_speech_speed_input = QDoubleSpinBox()
         self.tts_status_label = QLabel("")
         self.tts_progress = QProgressBar()
         self.tts_install_button = QPushButton("Install / Repair")
@@ -247,12 +251,13 @@ class SettingsDialog(QDialog):
         )
         tts_form.addRow("Deck voices", self.tts_deck_table)
 
-        self.tts_length_scale_input.setRange(0.7, 1.4)
-        self.tts_length_scale_input.setSingleStep(0.05)
-        self.tts_length_scale_input.setDecimals(2)
-        self.tts_length_scale_input.setSuffix("x duration")
-        self.tts_length_scale_input.setValue(float(tts_config.get("length_scale", 1.0)))
-        tts_form.addRow("Speech pace", self.tts_length_scale_input)
+        self.tts_speech_speed_input.setRange(0.7, 1.4)
+        self.tts_speech_speed_input.setSingleStep(0.05)
+        self.tts_speech_speed_input.setDecimals(2)
+        self.tts_speech_speed_input.setSuffix("x")
+        self.tts_speech_speed_input.setValue(configured_speech_speed(self.config))
+        self.tts_speech_speed_input.setToolTip("Higher values speak faster.")
+        tts_form.addRow("Speech speed", self.tts_speech_speed_input)
         layout.addLayout(tts_form)
 
         self.tts_status_label.setWordWrap(True)
@@ -297,7 +302,8 @@ class SettingsDialog(QDialog):
         tts["enabled"] = self.tts_enabled_input.isChecked()
         tts["engine"] = "piper"
         tts["deck_voices"] = self._deck_voice_assignments()
-        tts["length_scale"] = self.tts_length_scale_input.value()
+        tts["speech_speed"] = self.tts_speech_speed_input.value()
+        tts.pop("length_scale", None)
         for legacy_key in ("language", "voice", "enabled_decks"):
             tts.pop(legacy_key, None)
         self.mw.addonManager.writeConfig(__name__, raw)
@@ -402,7 +408,7 @@ class SettingsDialog(QDialog):
         try:
             self._tts_test_service = PiperService(
                 voice_id=voice_id,
-                length_scale=self.tts_length_scale_input.value(),
+                length_scale=piper_length_scale_for_speed(self.tts_speech_speed_input.value()),
             )
         except TTSUnavailableError as exc:
             showWarning(str(exc), parent=self)
@@ -844,7 +850,9 @@ class SessionDialog(QDialog):
             try:
                 self.tts_service = PiperService(
                     voice_id=voice_id,
-                    length_scale=float(self.config.get("tts", {}).get("length_scale", 1.0))
+                    length_scale=piper_length_scale_for_speed(
+                        configured_speech_speed(self.config)
+                    ),
                 )
             except TTSUnavailableError as exc:
                 self._show_tts_failure(exc)

@@ -37,7 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": False,
         "engine": "piper",
         "deck_voices": {},
-        "length_scale": 1.0,
+        "speech_speed": 1.0,
     },
     "decks": [],
     "session": {
