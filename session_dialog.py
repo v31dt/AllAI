@@ -687,7 +687,8 @@ class SessionDialog(QDialog):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        self.next_button = QPushButton("Next →")
+        self.next_button = QPushButton("Next → (N / Enter)")
+        self.next_button.setToolTip("Next round: N or Enter, after rating every word.")
         self.next_button.setEnabled(False)
         self.next_button.clicked.connect(self._commit_round)
         self.exit_button = QPushButton("Exit session")
@@ -705,12 +706,20 @@ class SessionDialog(QDialog):
         self._register_shortcut(QKeySequence(Qt.Key.Key_Up), partial(self._move_active_row, -1))
         self._register_shortcut(QKeySequence(Qt.Key.Key_Down), partial(self._move_active_row, 1))
         self._register_shortcut(QKeySequence("R"), self._play_round_audio)
+        for key in (Qt.Key.Key_N, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = self._register_shortcut(QKeySequence(key), self._activate_next)
+            shortcut.setAutoRepeat(False)
 
-    def _register_shortcut(self, sequence: QKeySequence, handler: Any) -> None:
+    def _register_shortcut(self, sequence: QKeySequence, handler: Any) -> QShortcut:
         shortcut = QShortcut(sequence, self)
         shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         shortcut.activated.connect(handler)
         self._shortcuts.append(shortcut)
+        return shortcut
+
+    def _activate_next(self) -> None:
+        if self.next_button.isEnabled():
+            self.next_button.click()
 
     def _load_config(self) -> dict[str, Any]:
         current = self.mw.addonManager.getConfig(__name__) or {}
@@ -939,6 +948,7 @@ class SessionDialog(QDialog):
     def _commit_round(self) -> None:
         if self.current_round is None:
             return
+        self.next_button.setEnabled(False)
         self._stop_round_audio()
         ratings = {
             widget.row.card_id: widget.rating
